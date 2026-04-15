@@ -1,0 +1,46 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            IMPORTANT: You MUST always leave a review comment on the PR, no matter what.
+            - If you find issues or have suggestions, post your detailed review as a PR comment.
+            - If everything looks good and you have no concerns, post a PR comment that says: "LGTM — Claude Code Review found no issues."
+            - Never silently finish without posting a comment. The team relies on seeing your comment to know the review ran.
+
+            CRITICAL REVIEW FOCUS for this repo:
+            - Does any code parse, modify, or reconstruct request/response bodies? This is a BLOCKER — Relay must be a pure passthrough.
+            - Are provider API keys ever exposed in logs, error messages, or responses?
+            - Is the budget check fail-closed (reject on DB error)?
+            - Is usage logging fail-open (don't block response on log failure)?
+          claude_args: '--model claude-opus-4-6 --allowedTools "Bash(gh pr:*),Bash(gh issue:*),Bash(gh search:*),Bash(gh api:*),Bash(test:*),WebFetch,mcp__github_inline_comment__create_inline_comment"'

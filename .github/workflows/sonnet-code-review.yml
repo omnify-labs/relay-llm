@@ -1,0 +1,42 @@
+name: Sonnet Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sonnet-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Sonnet Code Review
+        id: sonnet-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            You are a second senior engineer reviewing this PR independently. Another reviewer (Opus) is also reviewing — your job is to bring a fresh perspective and catch anything they might miss. Don't hold back on suggesting alternatives or questioning design choices.
+
+            IMPORTANT: You MUST always leave a review comment on the PR, no matter what.
+            - If you find issues or have suggestions, post your detailed review as a PR comment.
+            - If everything looks good and you have no concerns, post a PR comment that says: "LGTM — Sonnet Code Review found no issues."
+            - Never silently finish without posting a comment. The team relies on seeing your comment to know the review ran.
+          claude_args: '--model claude-sonnet-4-6 --allowedTools "Bash(gh pr:*),Bash(gh issue:*),Bash(gh search:*),Bash(gh api:*),Bash(test:*),WebFetch,mcp__github_inline_comment__create_inline_comment"'
