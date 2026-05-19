@@ -15,6 +15,9 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { PROVIDERS, type ProviderName } from './providers.js';
 import { logUsage } from '../billing/usage.js';
 
+/** Route suffix that identifies audio transcription requests. */
+const TRANSCRIPTION_PATH_SUFFIX = '/audio/transcriptions';
+
 /**
  * Build upstream URL by stripping the route prefix and appending to the provider's base URL.
  */
@@ -132,12 +135,14 @@ export function proxyHandler(provider: ProviderName): MiddlewareHandler {
         });
       }
 
+      const requestPath = c.req.path;
+
       if (isStreaming) {
         // SSE streaming: pipe through unchanged, tee for usage extraction
         const [clientStream, usageStream] = upstreamResponse.body.tee();
 
         // Async usage extraction — does not block the client stream
-        extractAndLogUsage(usageStream, provider, userId, requestId, latencyMs).catch(
+        extractAndLogUsage(usageStream, provider, userId, requestId, latencyMs, requestPath).catch(
           (err) => {
             const msg = err instanceof Error ? err.message : 'Unknown error';
             console.error(`[Relay] Usage logging failed: ${msg}`);
@@ -160,6 +165,7 @@ export function proxyHandler(provider: ProviderName): MiddlewareHandler {
           requestId,
           latencyMs,
           upstreamResponse.status,
+          requestPath,
         ).catch((err) => {
           const msg = err instanceof Error ? err.message : 'Unknown error';
           console.error(`[Relay] Usage logging failed: ${msg}`);
@@ -193,6 +199,7 @@ async function extractAndLogUsage(
   userId: string,
   requestId: string,
   latencyMs: number,
+  requestPath: string,
 ): Promise<void> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
@@ -222,12 +229,19 @@ async function extractAndLogUsage(
       requestId,
       latencyMs,
       statusCode: 200,
+      isTranscription: requestPath.endsWith(TRANSCRIPTION_PATH_SUFFIX),
     });
   }
 }
 
 /**
  * Extract token usage from a non-streaming response body.
+ *
+ * For audio transcription routes (path ends with /audio/transcriptions) the upstream
+ * returns `{ text: "..." }` with no `usage` object. We log a synthetic zero-cost record
+ * so the request still appears in the audit log.
+ * Reason: Whisper billing by duration requires a separate metering pass; this keeps the
+ * usage_logs table consistent without blocking the response path.
  */
 async function extractAndLogUsageFromBody(
   body: Uint8Array,
@@ -236,7 +250,29 @@ async function extractAndLogUsageFromBody(
   requestId: string,
   latencyMs: number,
   statusCode: number,
+  requestPath: string,
 ): Promise<void> {
+  const isTranscription = requestPath.endsWith(TRANSCRIPTION_PATH_SUFFIX);
+
+  if (isTranscription) {
+    // Reason: Whisper responses carry only { text } — no usage field. Log a synthetic
+    // zero-cost record so the request is visible in usage_logs without erroring.
+    await logUsage({
+      userId,
+      provider,
+      model: 'whisper-1',
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      cacheCreationTokens: 0,
+      requestId,
+      latencyMs,
+      statusCode,
+      isTranscription: true,
+    });
+    return;
+  }
+
   const text = new TextDecoder().decode(body);
   const usage = parseUsageFromBody(text, provider);
   if (usage) {
