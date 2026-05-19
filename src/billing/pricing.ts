@@ -1,6 +1,6 @@
 /**
  * Model pricing table with cache and tiered pricing support.
- * Prices are per 1 million tokens.
+ * Prices are per 1 million tokens (chat) or per second (audio transcription).
  *
  * TODO: Move to database table (model_pricing) for runtime updates without redeploy.
  */
@@ -141,3 +141,14 @@ export function calculateCost(
 
   return inputCost + cachedReadCost + cacheWriteCost + outputCost;
 }
+
+/**
+ * Pricing for audio transcription models (per-second cost model).
+ * These models return `{ text: "..." }` — no token usage — so cost is billed by audio duration.
+ *
+ * Source: https://platform.openai.com/docs/pricing (verified 2026-05-14)
+ *   Whisper-1: $0.006 / minute → $0.0001 / second
+ */
+export const TRANSCRIPTION_PRICING: Record<string, { perSecondUsd: number }> = {
+  'whisper-1': { perSecondUsd: 0.006 / 60 },
+};

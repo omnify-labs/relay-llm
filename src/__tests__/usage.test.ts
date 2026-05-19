@@ -145,3 +145,64 @@ describe('logUsage', () => {
     vi.restoreAllMocks();
   });
 });
+
+describe('logUsage — transcription path (whisper-1)', () => {
+  /**
+   * Whisper responses carry only { text: "..." } — no usage object.
+   * logUsage must not throw, must not call calculateCost, and must log costUsd=0.
+   */
+  const transcriptionRecord: UsageRecord = {
+    userId: 'user-voice-001',
+    provider: 'openai',
+    model: 'whisper-1',
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    requestId: 'req-audio-001',
+    latencyMs: 350,
+    statusCode: 200,
+    isTranscription: true,
+  };
+
+  it('does not throw when response carries no usage object (whisper-1)', async () => {
+    await expect(logUsage(transcriptionRecord)).resolves.not.toThrow();
+  });
+
+  it('logs costUsd=0 for transcription requests (v1 accounting gap)', async () => {
+    await logUsage(transcriptionRecord);
+
+    expect(mockInsertUsageLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'whisper-1',
+        costUsd: 0,
+        totalTokens: 0,
+        isTranscription: true,
+      }),
+    );
+  });
+
+  it('increments user spend with $0 for transcription (does not draw from budget)', async () => {
+    await logUsage(transcriptionRecord);
+
+    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-voice-001', 0);
+  });
+
+  it('still writes the usage log row so the request appears in audit trail', async () => {
+    await logUsage(transcriptionRecord);
+
+    expect(mockInsertUsageLog).toHaveBeenCalledTimes(1);
+    expect(mockIncrementUserSpend).toHaveBeenCalledTimes(1);
+  });
+
+  it('is fail-open even when both db ops fail (transcription path)', async () => {
+    mockInsertUsageLog.mockRejectedValue(new Error('db down'));
+    mockIncrementUserSpend.mockRejectedValue(new Error('db down'));
+
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(logUsage(transcriptionRecord)).resolves.toBeUndefined();
+
+    vi.restoreAllMocks();
+  });
+});
