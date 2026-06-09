@@ -59,6 +59,10 @@ const PRICING: Record<string, ModelPricing> = {
   },
 
   // Google — cache read: 0.1x, Pro models have above-200K tiers
+  'gemini-3.5-flash': {
+    inputPerMillion: 1.50, outputPerMillion: 9.00,
+    cachedInputPerMillion: 0.15, cacheCreationPerMillion: 0,
+  },
   'gemini-3.1-pro-preview': {
     inputPerMillion: 2.00, outputPerMillion: 12.00,
     cachedInputPerMillion: 0.20, cacheCreationPerMillion: 0,

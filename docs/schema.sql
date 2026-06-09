@@ -47,6 +47,7 @@ INSERT INTO model_pricing (model, provider, input_price_per_million, output_pric
   ('claude-opus-4-6', 'anthropic', 5.00, 25.00),
   ('claude-sonnet-4-5', 'anthropic', 3.00, 15.00),
   ('claude-haiku-4-5', 'anthropic', 1.00, 5.00),
+  ('gemini-3.5-flash', 'google', 1.50, 9.00),
   ('gemini-3.1-pro-preview', 'google', 2.00, 12.00),
   ('gemini-3-flash-preview', 'google', 0.50, 3.00),
   ('gemini-2.5-pro-preview', 'google', 1.25, 10.00),
