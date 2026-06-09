@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
-    "hono": "^4.12.14",
+    "hono": "^4.12.21",
     "jose": "^6.2.2",
     "postgres": "^3.4.9"
   },
@@ -28,7 +28,7 @@
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.58.2",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=20"
