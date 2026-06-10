@@ -20,7 +20,9 @@
 #   0  relay accepted the signature (HTTP != 401) — auth is healthy
 #   1  relay rejected the signature (HTTP 401) — JWT_SECRET drift
 #   2  relay unreachable / unexpected error
-set -uo pipefail
+# Reason: -e so a broken openssl/date (malformed JWT) aborts loudly instead of
+# silently sending a bad token and reporting a false "drift" 401.
+set -euo pipefail
 
 URL="${1:?usage: probe-auth.sh <relay-base-url>}"
 SECRET="${PROBE_SIGNING_SECRET:?set PROBE_SIGNING_SECRET to the Supabase JWT secret}"

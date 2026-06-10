@@ -245,6 +245,19 @@ gcloud run deploy relay-llm \
 
 Set env vars via Cloud Run console or `--set-env-vars`. Never put API keys in CLI commands.
 
+## Monitoring
+
+**Auth-drift monitor** (`.github/workflows/auth-drift-monitor.yml`) runs every 15 minutes and verifies the relay still validates JWTs signed with the expected upstream secret. If the relay's `JWT_SECRET` ever drifts from the issuer's signing secret (a bad deploy, or an upstream secret rotation the relay didn't pick up), **every authenticated request would 401** — a total outage that the unauthenticated `/health` check cannot detect. On failure it alerts via Slack.
+
+`scripts/probe-auth.sh <relay-base-url>` is the underlying check: it mints a short-lived HS256 token signed with `PROBE_SIGNING_SECRET` and confirms the relay accepts the signature (a budget rejection / `403` still means auth passed; only `401` means drift). Exit codes: `0` healthy, `1` drift, `2` unreachable.
+
+Required GitHub secrets:
+
+| Secret | Purpose |
+|--------|---------|
+| `RELAY_PROBE_JWT_SECRET` | The expected HS256 signing secret (must match the issuer). Update this whenever the upstream secret is rotated. |
+| `SLACK_WEBHOOK_URL` | Incoming webhook the failure alert posts to. |
+
 ## License
 
 AGPL-3.0 — see [LICENSE](LICENSE).

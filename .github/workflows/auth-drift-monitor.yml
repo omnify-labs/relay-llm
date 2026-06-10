@@ -55,7 +55,7 @@ jobs:
 
           > ${DETAIL}
 
-          *Fix:* compare \`JWT_SECRET\` in \`137.184.14.182:/srv/relay-llm/.env\` against Supabase \`GOTRUE_JWT_SECRET\`, then redeploy.
+          *Fix:* compare the relay's \`JWT_SECRET\` against Supabase \`GOTRUE_JWT_SECRET\`, then redeploy.
           *Run:* ${RUN_URL}
           EOF
           )
