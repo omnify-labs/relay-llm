@@ -19,6 +19,25 @@ describe('calculateCost', () => {
     expect(cost).toBeCloseTo(0.001 + 0.002, 6);
   });
 
+  it('calculates cost for gemini-3.5-flash (default managed model)', () => {
+    // Regression: previously missing from PRICING, so it silently fell through
+    // to DEFAULT_PRICING ($3/$15) and overcharged every managed user.
+    // input: 1M × $1.50/M = $1.50; output: 1M × $9.00/M = $9.00
+    const cost = calculateCost('gemini-3.5-flash', 1_000_000, 1_000_000, 0, 0);
+    expect(cost).toBeCloseTo(1.50 + 9.00, 4);
+    // Must NOT match the default-pricing fallback.
+    expect(cost).not.toBeCloseTo(3.0 + 15.0, 4);
+  });
+
+  it('applies gemini-3.5-flash cached input discount (90% off)', () => {
+    // 100K total input, 90K cached, 1K output
+    // non-cached: 10K × $1.50/M = $0.015
+    // cached: 90K × $0.15/M = $0.0135
+    // output: 1K × $9.00/M = $0.009
+    const cost = calculateCost('gemini-3.5-flash', 100_000, 1_000, 90_000, 0);
+    expect(cost).toBeCloseTo(0.015 + 0.0135 + 0.009, 4);
+  });
+
   it('uses default pricing for unknown models', () => {
     const cost = calculateCost('unknown-model-xyz', 1000000, 1000000, 0, 0);
     expect(cost).toBeCloseTo(3.0 + 15.0, 4);
