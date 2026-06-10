@@ -1,0 +1,67 @@
+name: Auth Drift Monitor
+
+# Periodically verifies relay.dassi.ai accepts a JWT signed with the expected
+# Supabase signing secret. Catches JWT_SECRET drift (bad deploy / unsynced
+# Supabase rotation) that would 401 every managed-credit request — something
+# the /health check cannot detect. DMs on failure.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *' # every 15 minutes
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auth-drift-monitor
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe relay auth
+        id: probe
+        env:
+          PROBE_SIGNING_SECRET: ${{ secrets.RELAY_PROBE_JWT_SECRET }}
+        run: |
+          set +e
+          out=$(./scripts/probe-auth.sh https://relay.dassi.ai 2>&1)
+          rc=$?
+          echo "$out"
+          {
+            echo "result<<EOF"
+            echo "$out"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Alert on drift
+        if: failure()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          DETAIL: ${{ steps.probe.outputs.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+            echo "SLACK_WEBHOOK_URL not set; skipping alert"
+            exit 0
+          fi
+          msg=$(cat <<EOF
+          :rotating_light: *relay-llm auth drift* — \`relay.dassi.ai\` rejected a token signed with the expected Supabase secret. Managed-credit users may be locked out (every request 401s).
+
+          > ${DETAIL}
+
+          *Fix:* compare \`JWT_SECRET\` in \`137.184.14.182:/srv/relay-llm/.env\` against Supabase \`GOTRUE_JWT_SECRET\`, then redeploy.
+          *Run:* ${RUN_URL}
+          EOF
+          )
+          payload=$(printf '%s' "$msg" | python3 -c 'import json,sys; print(json.dumps({"text": sys.stdin.read()}))')
+          if curl -sf -X POST "$SLACK_WEBHOOK_URL" -H 'Content-Type: application/json' --data "$payload"; then
+            echo "Slack alert sent"
+          else
+            echo "Slack alert failed to send"
+          fi
