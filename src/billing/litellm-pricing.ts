@@ -1,0 +1,113 @@
+// src/billing/litellm-pricing.ts
+/**
+ * Loads model pricing from the vendored LiteLLM price table and normalizes it
+ * into relay's per-million ModelPricing shape.
+ *
+ * Source of truth: vendor/litellm/model_prices_and_context_window.json
+ * (a git submodule of BerriAI/litellm, auto-bumped by Dependabot). tsup inlines
+ * the JSON at build time, so there is no runtime file dependency.
+ *
+ * Reason: LiteLLM stores cost PER TOKEN; relay bills PER MILLION tokens (×1e6).
+ */
+import rawPrices from '../../vendor/litellm/model_prices_and_context_window.json';
+
+export interface ModelPricing {
+  inputPerMillion: number;
+  outputPerMillion: number;
+  cachedInputPerMillion: number;
+  cacheCreationPerMillion: number;
+  inputPerMillionAbove200k?: number;
+  outputPerMillionAbove200k?: number;
+  cachedInputPerMillionAbove200k?: number;
+}
+
+/** Only the LiteLLM fields relay consumes; the file has many more we ignore. */
+interface LiteLLMEntry {
+  input_cost_per_token?: number;
+  output_cost_per_token?: number;
+  cache_read_input_token_cost?: number;
+  cache_creation_input_token_cost?: number;
+  input_cost_per_token_above_200k_tokens?: number;
+  output_cost_per_token_above_200k_tokens?: number;
+  cache_read_input_token_cost_above_200k_tokens?: number;
+}
+
+const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>;
+const M = 1_000_000;
+
+/**
+ * Model IDs relay serves (as returned by the provider in responses).
+ * Every entry MUST resolve to a real LiteLLM price — missingServedModels() enforces it.
+ */
+export const SERVED_MODELS: readonly string[] = [
+  'gpt-5.4', 'gpt-4.1', 'gpt-4o', 'o4-mini',
+  'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
+  'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
+  'gemini-2.5-pro-preview', 'gemini-2.0-flash', 'deepseek-v3.2',
+];
+
+/** relay model id -> LiteLLM key, for the few that don't match exactly. */
+export const ALIASES: Record<string, string> = {
+  'gemini-2.5-pro-preview': 'gemini-2.5-pro',
+  'deepseek-v3.2': 'deepseek-chat',
+};
+
+function toMillion(perToken: number | undefined): number {
+  return perToken != null ? perToken * M : 0;
+}
+
+/** Convert one LiteLLM entry to relay's per-million ModelPricing. */
+export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
+  const pricing: ModelPricing = {
+    inputPerMillion: toMillion(entry.input_cost_per_token),
+    outputPerMillion: toMillion(entry.output_cost_per_token),
+    cachedInputPerMillion: toMillion(entry.cache_read_input_token_cost),
+    cacheCreationPerMillion: toMillion(entry.cache_creation_input_token_cost),
+  };
+  if (entry.input_cost_per_token_above_200k_tokens != null) {
+    pricing.inputPerMillionAbove200k = toMillion(entry.input_cost_per_token_above_200k_tokens);
+  }
+  if (entry.output_cost_per_token_above_200k_tokens != null) {
+    pricing.outputPerMillionAbove200k = toMillion(entry.output_cost_per_token_above_200k_tokens);
+  }
+  if (entry.cache_read_input_token_cost_above_200k_tokens != null) {
+    pricing.cachedInputPerMillionAbove200k = toMillion(entry.cache_read_input_token_cost_above_200k_tokens);
+  }
+  return pricing;
+}
+
+/** Resolve a relay model id to its LiteLLM entry (via alias), or null. */
+export function lookupRaw(model: string): LiteLLMEntry | null {
+  const key = ALIASES[model] ?? model;
+  return RAW[key] ?? null;
+}
+
+/** Served models that have no usable LiteLLM price (input cost missing). */
+export function missingServedModels(): string[] {
+  return SERVED_MODELS.filter((m) => {
+    const e = lookupRaw(m);
+    return !e || e.input_cost_per_token == null;
+  });
+}
+
+/** Build the served-model pricing table, keyed by relay model id. */
+function buildPricingTable(): Record<string, ModelPricing> {
+  const table: Record<string, ModelPricing> = {};
+  for (const model of SERVED_MODELS) {
+    const entry = lookupRaw(model);
+    if (entry && entry.input_cost_per_token != null) {
+      table[model] = normalizeEntry(entry);
+    }
+  }
+  const missing = missingServedModels();
+  if (missing.length > 0) {
+    // Reason: a missing served model falls to DEFAULT_PRICING (conservative) in
+    // calculateCost — log loud so coverage gaps surface instead of silently mischarging.
+    console.error(
+      `[Relay] LiteLLM pricing MISSING for served models: ${missing.join(', ')} — falling back to DEFAULT_PRICING.`,
+    );
+  }
+  return table;
+}
+
+export const PRICING: Record<string, ModelPricing> = buildPricingTable();
