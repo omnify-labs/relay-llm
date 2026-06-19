@@ -62,6 +62,9 @@ fi
 
 echo "[deploy] relay (:$CURRENT_PORT) → relay-new (:$NEXT_PORT)"
 
+# Ensure the LiteLLM pricing submodule is present for the build context.
+git submodule update --init --depth 1 vendor/litellm
+
 # --- 0. Sync nginx config from repo ---
 
 NGINX_SRC="/srv/relay-llm/nginx.conf"
