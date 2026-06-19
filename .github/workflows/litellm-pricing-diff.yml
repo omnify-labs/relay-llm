@@ -21,7 +21,6 @@ jobs:
         id: diff
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
-          FILE="vendor/litellm/model_prices_and_context_window.json"
           # Resolve the submodule-pinned blob on base vs. PR head and compare.
           base_blob=$(git ls-tree "$BASE" vendor/litellm | awk '{print $3}')
           head_blob=$(git ls-tree HEAD vendor/litellm | awk '{print $3}')
