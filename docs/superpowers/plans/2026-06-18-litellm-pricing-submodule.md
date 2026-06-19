@@ -515,20 +515,19 @@ git commit -m "ci: dependabot auto-PR for LiteLLM pricing + unchanged-diff guard
 
 ### Task 6: Auto-deploy on merge to main (Phase 1)
 
-> **Requires repo secrets** — confirm with the maintainer before implementing: `DROPLET_HOST` (137.184.14.182), `DROPLET_SSH_KEY` (private key for `/srv/relay-llm`), and GHCR push creds (or reuse `GITHUB_TOKEN` for `ghcr.io`). Per project memory, relay deploys **build on the box** via `scripts/deploy.sh <ghcr-image-by-sha>` (manual blue-green). This task automates the trigger only; it must not change the blue-green mechanics.
+> **Verified facts (controller checked 2026-06-19):**
+> - `scripts/deploy.sh <docker-image>` deploys a **pre-built image** (blue-green, auto-rollback on health-check fail). It does NOT build — CI must produce an image and pass its ref.
+> - The box (`137.184.14.182`) has **no git checkout** and `git archive` excludes submodule contents — so building on the box is NOT viable for the submodule. **Build in CI**, where `actions/checkout` checks out the submodule. `ubuntu-latest` is amd64 = prod arch.
+> - The box is already `docker login`'d to `ghcr.io` and runs `ghcr.io/omnify-labs/relay-llm:<sha>`. Image scheme: `ghcr.io/omnify-labs/relay-llm:<full-git-sha>`.
+> - **Required repo secrets (controller adds/confirms with user):** `DROPLET_HOST` = `137.184.14.182`, `DROPLET_SSH_KEY` = the `id_ed25519_do_new_jianming` private key. `GITHUB_TOKEN` (automatic) pushes to GHCR via `permissions: packages: write`.
 
 **Files:**
 - Create: `.github/workflows/deploy.yml`
 
 **Interfaces:**
-- Consumes: the existing `scripts/deploy.sh` contract (read it first to confirm its argument shape and whether it pulls a prebuilt image or builds on the box).
+- Produces: pushes `ghcr.io/omnify-labs/relay-llm:${{ github.sha }}`, then runs `/srv/relay-llm/deploy.sh <that image>` on the box.
 
-- [ ] **Step 1: Read the deploy contract**
-
-Run: `sed -n '1,60p' scripts/deploy.sh`
-Note: confirm exact arg (`deploy.sh <image-ref>` vs builds locally) and the remote path. Adjust Step 2 to match. Do not guess — match what the script actually expects.
-
-- [ ] **Step 2: Add the deploy workflow (skeleton matched to deploy.sh)**
+- [ ] **Step 1: Add the deploy workflow**
 
 ```yaml
 # .github/workflows/deploy.yml
@@ -536,10 +535,10 @@ name: Deploy relay
 on:
   push:
     branches: [main]
-    # Only when code/build inputs change (pricing bumps land here too).
     paths:
       - "src/**"
       - "vendor/litellm"
+      - ".gitmodules"
       - "Dockerfile"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -548,6 +547,10 @@ concurrency:
   group: deploy-relay
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -555,7 +558,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Deploy over SSH (build on box, blue-green)
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/omnify-labs/relay-llm:${{ github.sha }}
+      - name: Deploy over SSH (pull + blue-green)
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DROPLET_HOST }}
@@ -563,28 +578,23 @@ jobs:
           key: ${{ secrets.DROPLET_SSH_KEY }}
           script: |
             set -euo pipefail
-            cd /srv/relay-llm
-            git fetch origin main
-            git checkout "${{ github.sha }}"
-            git submodule update --init --depth 1 vendor/litellm
-            ./scripts/deploy.sh "${{ github.sha }}"
+            docker pull "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
+            /srv/relay-llm/deploy.sh "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
 ```
 
-- [ ] **Step 3: Validate YAML**
+- [ ] **Step 2: Validate YAML**
 
 Run: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/deploy.yml')); print('YAML OK')"`
 Expected: `YAML OK`.
 
-- [ ] **Step 4: Dry-run review (do NOT trigger a live deploy from the feature branch)**
-
-Confirm with the maintainer that secrets exist and the `deploy.sh "${{ github.sha }}"` invocation matches Step 1's findings. Only then merge.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add .github/workflows/deploy.yml
-git commit -m "ci: auto-deploy relay on merge to main (build-on-box blue-green)"
+git commit -m "ci: auto-deploy relay on merge to main (CI build+push GHCR, blue-green on box)"
 ```
+
+- [ ] **Step 4 (controller, post-merge — NOT this task):** ensure secrets `DROPLET_HOST` + `DROPLET_SSH_KEY` exist before the first merge to main. The workflow only triggers on push to `main`, so it no-ops on the feature branch.
 
 ---
 
