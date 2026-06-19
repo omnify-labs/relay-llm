@@ -428,7 +428,7 @@ git commit -m "build: include LiteLLM price submodule in docker build + deploy"
 - Create: `.github/workflows/litellm-pricing-diff.yml`
 
 **Interfaces:**
-- Produces: a weekly Dependabot PR bumping `vendor/litellm`; the guard auto-closes PRs whose price JSON did not change.
+- Produces: a daily Dependabot PR bumping `vendor/litellm`; the guard auto-closes PRs whose price JSON did not change.
 
 - [ ] **Step 1: Add Dependabot config**
 
@@ -439,7 +439,7 @@ updates:
   - package-ecosystem: "gitsubmodule"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
     labels:
       - "submodule"
       - "litellm-pricing"

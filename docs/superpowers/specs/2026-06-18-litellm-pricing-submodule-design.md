@@ -89,8 +89,9 @@ alias resolution, so we notice coverage gaps instead of silently defaulting.
 
 ## Automation (the "dependency bot, push mode")
 
-- **`.github/dependabot.yml`**: `package-ecosystem: gitsubmodule`, weekly schedule. Dependabot opens a
-  PR bumping `vendor/litellm` to upstream's latest commit.
+- **`.github/dependabot.yml`**: `package-ecosystem: gitsubmodule`, **daily** schedule (Dependabot's
+  smallest reliable predefined interval; pricing changes are infrequent so daily is ample). Dependabot
+  opens a PR bumping `vendor/litellm` to upstream's latest commit.
 - **Noise guard** (`.github/workflows/litellm-pricing-diff.yml`): on Dependabot submodule PRs, diff
   *only* `model_prices_and_context_window.json` between base and PR SHA. If unchanged, auto-close the
   PR with a comment. Reason: LiteLLM's repo commits many times/day, mostly unrelated to pricing.
