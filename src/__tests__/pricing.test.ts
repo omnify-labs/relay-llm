@@ -1,32 +1,32 @@
 import { describe, it, expect } from 'vitest';
 import { calculateCost } from '../billing/pricing.js';
+import { PRICING } from '../billing/litellm-pricing.js';
+
+// helper: expected simple in+out cost from the live table
+const io = (m: string, inTok: number, outTok: number) =>
+  (inTok / 1e6) * PRICING[m].inputPerMillion + (outTok / 1e6) * PRICING[m].outputPerMillion;
 
 describe('calculateCost', () => {
   // --- Existing tests (updated signature) ---
 
   it('calculates cost for known OpenAI model', () => {
-    const cost = calculateCost('gpt-5.4', 1000, 500, 0, 0);
-    expect(cost).toBeCloseTo(0.0025 + 0.0075, 6);
+    expect(calculateCost('gpt-5.4', 1000, 500, 0, 0)).toBeCloseTo(io('gpt-5.4', 1000, 500), 6);
   });
 
   it('calculates cost for known Anthropic model', () => {
-    const cost = calculateCost('claude-sonnet-4-5', 2000, 1000, 0, 0);
-    expect(cost).toBeCloseTo(0.006 + 0.015, 6);
+    expect(calculateCost('claude-sonnet-4-5', 2000, 1000, 0, 0))
+      .toBeCloseTo(io('claude-sonnet-4-5', 2000, 1000), 6);
   });
 
   it('calculates cost for known Google model', () => {
-    const cost = calculateCost('gemini-2.0-flash', 10000, 5000, 0, 0);
-    expect(cost).toBeCloseTo(0.001 + 0.002, 6);
+    expect(calculateCost('gemini-2.0-flash', 10000, 5000, 0, 0))
+      .toBeCloseTo(io('gemini-2.0-flash', 10000, 5000), 6);
   });
 
-  it('calculates cost for gemini-3.5-flash (default managed model)', () => {
-    // Regression: previously missing from PRICING, so it silently fell through
-    // to DEFAULT_PRICING ($3/$15) and overcharged every managed user.
-    // input: 1M × $1.50/M = $1.50; output: 1M × $9.00/M = $9.00
+  it('gemini-3.5-flash resolves to a real (non-default) price', () => {
     const cost = calculateCost('gemini-3.5-flash', 1_000_000, 1_000_000, 0, 0);
-    expect(cost).toBeCloseTo(1.50 + 9.00, 4);
-    // Must NOT match the default-pricing fallback.
-    expect(cost).not.toBeCloseTo(3.0 + 15.0, 4);
+    expect(cost).toBeCloseTo(io('gemini-3.5-flash', 1_000_000, 1_000_000), 4);
+    expect(cost).not.toBeCloseTo(3.0 + 15.0, 4); // not the DEFAULT_PRICING fallback
   });
 
   it('applies gemini-3.5-flash cached input discount (90% off)', () => {

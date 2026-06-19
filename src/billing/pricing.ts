@@ -1,105 +1,13 @@
-/**
- * Model pricing table with cache and tiered pricing support.
- * Prices are per 1 million tokens.
- *
- * TODO: Move to database table (model_pricing) for runtime updates without redeploy.
- */
-
-interface ModelPricing {
-  inputPerMillion: number;
-  outputPerMillion: number;
-  cachedInputPerMillion: number;
-  cacheCreationPerMillion: number;
-  /** When defined, ALL tokens use this rate if total prompt tokens > 200K. */
-  inputPerMillionAbove200k?: number;
-  outputPerMillionAbove200k?: number;
-  cachedInputPerMillionAbove200k?: number;
-}
-
-/**
- * Pricing table — update as providers change prices.
- * Key format: model ID as returned by the provider in the response.
- *
- * Sources (verified 2026-03-30):
- *   OpenAI:    https://developers.openai.com/api/docs/pricing
- *   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
- *   Google:    https://ai.google.dev/gemini-api/docs/pricing
- */
-const PRICING: Record<string, ModelPricing> = {
-  // OpenAI — cache discount: 90% (5.4), 75% (4.1, o4-mini), 50% (4o)
-  'gpt-5.4': {
-    inputPerMillion: 2.50, outputPerMillion: 15.00,
-    cachedInputPerMillion: 0.25, cacheCreationPerMillion: 0,
-  },
-  'gpt-4.1': {
-    inputPerMillion: 2.00, outputPerMillion: 8.00,
-    cachedInputPerMillion: 0.50, cacheCreationPerMillion: 0,
-  },
-  'gpt-4o': {
-    inputPerMillion: 2.50, outputPerMillion: 10.00,
-    cachedInputPerMillion: 1.25, cacheCreationPerMillion: 0,
-  },
-  'o4-mini': {
-    inputPerMillion: 1.10, outputPerMillion: 4.40,
-    cachedInputPerMillion: 0.275, cacheCreationPerMillion: 0,
-  },
-
-  // Anthropic — cache read: 0.1x, cache write (5min): 1.25x
-  'claude-opus-4-6': {
-    inputPerMillion: 5.00, outputPerMillion: 25.00,
-    cachedInputPerMillion: 0.50, cacheCreationPerMillion: 6.25,
-  },
-  'claude-sonnet-4-5': {
-    inputPerMillion: 3.00, outputPerMillion: 15.00,
-    cachedInputPerMillion: 0.30, cacheCreationPerMillion: 3.75,
-  },
-  'claude-haiku-4-5': {
-    inputPerMillion: 1.00, outputPerMillion: 5.00,
-    cachedInputPerMillion: 0.10, cacheCreationPerMillion: 1.25,
-  },
-
-  // Google — cache read: 0.1x, Pro models have above-200K tiers
-  'gemini-3.5-flash': {
-    inputPerMillion: 1.50, outputPerMillion: 9.00,
-    cachedInputPerMillion: 0.15, cacheCreationPerMillion: 0,
-  },
-  'gemini-3.1-pro-preview': {
-    inputPerMillion: 2.00, outputPerMillion: 12.00,
-    cachedInputPerMillion: 0.20, cacheCreationPerMillion: 0,
-    inputPerMillionAbove200k: 4.00, outputPerMillionAbove200k: 18.00,
-    cachedInputPerMillionAbove200k: 0.40,
-  },
-  'gemini-3-flash-preview': {
-    inputPerMillion: 0.50, outputPerMillion: 3.00,
-    cachedInputPerMillion: 0.05, cacheCreationPerMillion: 0,
-  },
-  'gemini-2.5-pro-preview': {
-    inputPerMillion: 1.25, outputPerMillion: 10.00,
-    cachedInputPerMillion: 0.125, cacheCreationPerMillion: 0,
-    inputPerMillionAbove200k: 2.50, outputPerMillionAbove200k: 15.00,
-    cachedInputPerMillionAbove200k: 0.25,
-  },
-  'gemini-2.0-flash': {
-    inputPerMillion: 0.10, outputPerMillion: 0.40,
-    cachedInputPerMillion: 0.025, cacheCreationPerMillion: 0,
-  },
-
-  // DeepSeek
-  'deepseek-v3.2': {
-    inputPerMillion: 0.28, outputPerMillion: 0.42,
-    cachedInputPerMillion: 0.07, cacheCreationPerMillion: 0,
-  },
-};
+import { PRICING, type ModelPricing } from './litellm-pricing.js';
 
 /**
  * Default pricing for unknown models — intentionally conservative (overestimates cost)
  * so we never undercharge for unrecognized models.
  */
-// Reason: For unknown models, charge cached tokens at the full input rate (no discount).
-// This avoids undercharging if the model doesn't actually offer cache pricing.
+// Reason: charge cached tokens at the full input rate (no discount) for unknown models.
 const DEFAULT_PRICING: ModelPricing = {
-  inputPerMillion: 3.00, outputPerMillion: 15.00,
-  cachedInputPerMillion: 3.00, cacheCreationPerMillion: 3.00,
+  inputPerMillion: 3.0, outputPerMillion: 15.0,
+  cachedInputPerMillion: 3.0, cacheCreationPerMillion: 3.0,
 };
 
 /**
