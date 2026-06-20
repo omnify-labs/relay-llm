@@ -32,7 +32,7 @@ interface LiteLLMEntry {
   cache_read_input_token_cost_above_200k_tokens?: number;
 }
 
-const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>;
+const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>; // Reason: the JSON import infers a deep literal type; `as unknown` widens it to a typed Record without @ts-ignore.
 const M = 1_000_000;
 
 /**
@@ -56,7 +56,11 @@ function toMillion(perToken: number | undefined): number {
   return perToken != null ? perToken * M : 0;
 }
 
-/** Convert one LiteLLM entry to relay's per-million ModelPricing. */
+/**
+ * Convert one LiteLLM entry to relay's per-million ModelPricing.
+ * @param entry - Raw LiteLLM pricing entry for a single model.
+ * @returns ModelPricing with all rates converted from per-token to per-million.
+ */
 export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
   const pricing: ModelPricing = {
     inputPerMillion: toMillion(entry.input_cost_per_token),
@@ -76,13 +80,20 @@ export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
   return pricing;
 }
 
-/** Resolve a relay model id to its LiteLLM entry (via alias), or null. */
+/**
+ * Resolve a relay model id to its LiteLLM entry (via alias), or null.
+ * @param model - Relay model ID (may be an alias for a LiteLLM key).
+ * @returns The raw LiteLLM entry for the model, or null if not found.
+ */
 export function lookupRaw(model: string): LiteLLMEntry | null {
   const key = ALIASES[model] ?? model;
   return RAW[key] ?? null;
 }
 
-/** Served models that have no usable LiteLLM price (input cost missing). */
+/**
+ * Served models that have no usable LiteLLM price (input cost missing).
+ * @returns Array of relay model IDs from SERVED_MODELS that lack a usable LiteLLM price entry.
+ */
 export function missingServedModels(): string[] {
   return SERVED_MODELS.filter((m) => {
     const e = lookupRaw(m);

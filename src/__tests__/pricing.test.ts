@@ -31,11 +31,16 @@ describe('calculateCost', () => {
 
   it('applies gemini-3.5-flash cached input discount (90% off)', () => {
     // 100K total input, 90K cached, 1K output
-    // non-cached: 10K × $1.50/M = $0.015
-    // cached: 90K × $0.15/M = $0.0135
-    // output: 1K × $9.00/M = $0.009
+    // non-cached: 10K × inputPerMillion/M
+    // cached: 90K × cachedInputPerMillion/M
+    // output: 1K × outputPerMillion/M
+    const p = PRICING['gemini-3.5-flash'];
+    const expected =
+      (10_000 / 1e6) * p.inputPerMillion +
+      (90_000 / 1e6) * p.cachedInputPerMillion +
+      (1_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('gemini-3.5-flash', 100_000, 1_000, 90_000, 0);
-    expect(cost).toBeCloseTo(0.015 + 0.0135 + 0.009, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('uses default pricing for unknown models', () => {
@@ -51,67 +56,100 @@ describe('calculateCost', () => {
 
   it('applies OpenAI cached input discount (gpt-4.1 = 75% off)', () => {
     // 1M total input, 800K cached, 200K output
-    // non-cached input: 200K × $2.00/M = $0.40
-    // cached input: 800K × $0.50/M = $0.40
-    // output: 200K × $8.00/M = $1.60
+    // non-cached input: 200K × inputPerMillion/M
+    // cached input: 800K × cachedInputPerMillion/M
+    // output: 200K × outputPerMillion/M
+    const p = PRICING['gpt-4.1'];
+    const expected =
+      (200_000 / 1e6) * p.inputPerMillion +
+      (800_000 / 1e6) * p.cachedInputPerMillion +
+      (200_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('gpt-4.1', 1_000_000, 200_000, 800_000, 0);
-    expect(cost).toBeCloseTo(0.40 + 0.40 + 1.60, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('applies Google cached input discount (gemini-3.1-pro = 90% off)', () => {
-    // 100K total input, 90K cached, 1K output
-    // non-cached: 10K × $2.00/M = $0.02
-    // cached: 90K × $0.20/M = $0.018
-    // output: 1K × $12.00/M = $0.012
+    // 100K total input, 90K cached, 1K output — below 200K threshold so standard rates apply
+    // non-cached: 10K × inputPerMillion/M
+    // cached: 90K × cachedInputPerMillion/M
+    // output: 1K × outputPerMillion/M
+    const p = PRICING['gemini-3.1-pro-preview'];
+    const expected =
+      (10_000 / 1e6) * p.inputPerMillion +
+      (90_000 / 1e6) * p.cachedInputPerMillion +
+      (1_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('gemini-3.1-pro-preview', 100_000, 1_000, 90_000, 0);
-    expect(cost).toBeCloseTo(0.02 + 0.018 + 0.012, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('applies Anthropic cache read discount (claude-opus-4-6 = 90% off)', () => {
     // 50K total input (includes cache), 40K cache read, 5K output
-    // non-cached: 10K × $5.00/M = $0.05
-    // cache read: 40K × $0.50/M = $0.02
-    // output: 5K × $25.00/M = $0.125
+    // non-cached: 10K × inputPerMillion/M
+    // cache read: 40K × cachedInputPerMillion/M
+    // output: 5K × outputPerMillion/M
+    const p = PRICING['claude-opus-4-6'];
+    const expected =
+      (10_000 / 1e6) * p.inputPerMillion +
+      (40_000 / 1e6) * p.cachedInputPerMillion +
+      (5_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('claude-opus-4-6', 50_000, 5_000, 40_000, 0);
-    expect(cost).toBeCloseTo(0.05 + 0.02 + 0.125, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('applies Anthropic cache write pricing (1.25x base input)', () => {
     // 50K total, 10K cache creation, 30K cache read, 10K non-cached, 5K output
-    // non-cached: 10K × $3.00/M = $0.03
-    // cache read: 30K × $0.30/M = $0.009
-    // cache write: 10K × $3.75/M = $0.0375
-    // output: 5K × $15.00/M = $0.075
+    // non-cached: 10K × inputPerMillion/M
+    // cache read: 30K × cachedInputPerMillion/M
+    // cache write: 10K × cacheCreationPerMillion/M
+    // output: 5K × outputPerMillion/M
+    const p = PRICING['claude-sonnet-4-5'];
+    const expected =
+      (10_000 / 1e6) * p.inputPerMillion +
+      (30_000 / 1e6) * p.cachedInputPerMillion +
+      (10_000 / 1e6) * p.cacheCreationPerMillion +
+      (5_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('claude-sonnet-4-5', 50_000, 5_000, 30_000, 10_000);
-    expect(cost).toBeCloseTo(0.03 + 0.009 + 0.0375 + 0.075, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('applies above-200K tiered pricing for Google Pro models', () => {
-    // gemini-3.1-pro: 300K input (above 200K threshold), 10K output
-    // input: 300K × $4.00/M = $1.20 (high tier)
-    // output: 10K × $18.00/M = $0.18 (high tier)
+    // gemini-3.1-pro: 300K input (above 200K threshold), 10K output — high tier applies
+    // input: 300K × inputPerMillionAbove200k/M
+    // output: 10K × outputPerMillionAbove200k/M
+    const p = PRICING['gemini-3.1-pro-preview'];
+    const expected =
+      (300_000 / 1e6) * p.inputPerMillionAbove200k! +
+      (10_000 / 1e6) * p.outputPerMillionAbove200k!;
     const cost = calculateCost('gemini-3.1-pro-preview', 300_000, 10_000, 0, 0);
-    expect(cost).toBeCloseTo(1.20 + 0.18, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('applies above-200K tiered pricing with cached tokens', () => {
-    // gemini-2.5-pro: 250K total, 200K cached, 5K output
-    // non-cached: 50K × $2.50/M = $0.125 (high tier)
-    // cached: 200K × $0.25/M = $0.05 (high tier cached)
-    // output: 5K × $15.00/M = $0.075 (high tier)
+    // gemini-2.5-pro: 250K total, 200K cached, 5K output — above 200K so high-tier rates apply
+    // non-cached: 50K × inputPerMillionAbove200k/M
+    // cached: 200K × cachedInputPerMillionAbove200k/M
+    // output: 5K × outputPerMillionAbove200k/M
+    const p = PRICING['gemini-2.5-pro-preview'];
+    const expected =
+      (50_000 / 1e6) * p.inputPerMillionAbove200k! +
+      (200_000 / 1e6) * p.cachedInputPerMillionAbove200k! +
+      (5_000 / 1e6) * p.outputPerMillionAbove200k!;
     const cost = calculateCost('gemini-2.5-pro-preview', 250_000, 5_000, 200_000, 0);
-    expect(cost).toBeCloseTo(0.125 + 0.05 + 0.075, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('does NOT apply above-200K pricing for models without tiers', () => {
-    // gpt-4.1: 300K input — no above-200K tier exists
+    // gpt-4.1: 300K input — no above-200K tier exists, standard inputPerMillion applies
+    const p = PRICING['gpt-4.1'];
+    const expected = (300_000 / 1e6) * p.inputPerMillion;
     const cost = calculateCost('gpt-4.1', 300_000, 0, 0, 0);
-    expect(cost).toBeCloseTo(0.60, 4);
+    expect(cost).toBeCloseTo(expected, 4);
   });
 
   it('handles all cache tokens being zero (backward compat)', () => {
+    // 1000 input + 500 output, no cache — same as the simple io() helper
     const withZeros = calculateCost('gpt-5.4', 1000, 500, 0, 0);
-    expect(withZeros).toBeCloseTo(0.0025 + 0.0075, 6);
+    expect(withZeros).toBeCloseTo(io('gpt-5.4', 1000, 500), 6);
   });
 
   it('guards against cachedInputTokens exceeding total (provider bug)', () => {
