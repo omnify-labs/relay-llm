@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: "gitsubmodule"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    labels:
+      - "submodule"
+      - "litellm-pricing"
+    commit-message:
+      prefix: "build"

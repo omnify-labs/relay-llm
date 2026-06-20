@@ -231,6 +231,9 @@ src/
 ## Deploy
 
 ```bash
+# Ensure the LiteLLM pricing submodule is checked out (provides the price table baked into the image)
+git submodule update --init --depth 1 vendor/litellm
+
 # Build and deploy to Cloud Run
 docker build -t gcr.io/YOUR_PROJECT/relay-llm .
 docker push gcr.io/YOUR_PROJECT/relay-llm

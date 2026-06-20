@@ -1,0 +1,4 @@
+[submodule "vendor/litellm"]
+	path = vendor/litellm
+	url = https://github.com/BerriAI/litellm
+	branch = main

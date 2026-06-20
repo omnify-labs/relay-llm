@@ -8,6 +8,7 @@ RUN pnpm install --frozen-lockfile
 
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY vendor/litellm/model_prices_and_context_window.json ./vendor/litellm/
 RUN pnpm build
 
 FROM node:22-slim AS runner

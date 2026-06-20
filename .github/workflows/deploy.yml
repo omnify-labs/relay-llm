@@ -1,0 +1,50 @@
+# .github/workflows/deploy.yml
+name: Deploy relay
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "vendor/litellm"
+      - ".gitmodules"
+      - "Dockerfile"
+      - "package.json"
+      - "pnpm-lock.yaml"
+
+concurrency:
+  group: deploy-relay
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/omnify-labs/relay-llm:${{ github.sha }}
+      - name: Deploy over SSH (pull + blue-green)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: root
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            docker pull "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
+            /srv/relay-llm/deploy.sh "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
