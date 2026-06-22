@@ -10,7 +10,8 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
-    "test": "vitest"
+    "test": "vitest",
+    "prices:check": "tsx scripts/litellm-prices-check.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
