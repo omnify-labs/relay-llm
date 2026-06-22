@@ -1,0 +1,63 @@
+name: LiteLLM prices sync
+
+# Lightweight replacement for the Dependabot+submodule approach: Dependabot's
+# gitsubmodule updater must clone the ~1.1 GB BerriAI/litellm repo and times out,
+# so it never opens a PR. This fetches ONLY the single price JSON (like dassi's
+# pi-mono-version-check) and opens a PR when a served-model price changes.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily ~06:17 UTC (off the top of the hour to avoid load spikes)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: litellm-prices-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check upstream for served-model price changes
+        id: check
+        run: pnpm exec tsx scripts/litellm-prices-check.ts
+
+      # Validate the refreshed prices ourselves: a GITHUB_TOKEN-created PR does not
+      # trigger the CI workflow, so prove the change is good before opening it.
+      - name: Validate refreshed prices
+        if: steps.check.outputs.changed == 'true'
+        run: pnpm typecheck && pnpm test -- --run
+
+      - name: Open / update PR when a served price changed
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BRANCH="chore/litellm-prices-sync"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add vendor/litellm/model_prices_and_context_window.json
+          git commit -m "chore(pricing): sync LiteLLM model prices"
+          git push -f origin "$BRANCH"
+          # Dedup: only create a PR if one isn't already open for this branch.
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" ]; then
+            gh pr create --head "$BRANCH" --base main \
+              --title "chore(pricing): sync LiteLLM model prices" \
+              --body "Automated sync: a **served-model** price changed in the upstream LiteLLM table. The vendored \`vendor/litellm/model_prices_and_context_window.json\` has been refreshed to upstream. Typecheck + tests passed in the sync job. Review the price diff and merge to deploy."
+          fi

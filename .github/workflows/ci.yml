@@ -17,10 +17,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          # Reason: pricing is sourced from the vendor/litellm submodule; without it
-          # the JSON import in src/billing/litellm-pricing.ts fails typecheck/build.
-          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
