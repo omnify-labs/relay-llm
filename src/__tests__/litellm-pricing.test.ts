@@ -31,9 +31,9 @@ describe('litellm-pricing', () => {
   });
 
   it('resolves aliases for non-matching keys', () => {
-    expect(lookupRaw('gemini-2.5-pro-preview')).not.toBeNull();
-    expect(lookupRaw('deepseek-v3.2')).not.toBeNull();
     expect(ALIASES['gemini-2.5-pro-preview']).toBe('gemini-2.5-pro');
+    // The relay model id has no exact upstream key; the alias resolves it.
+    expect(lookupRaw('gemini-2.5-pro-preview')).not.toBeNull();
   });
 
   it('covers every served model with a non-default price', () => {

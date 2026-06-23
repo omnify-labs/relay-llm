@@ -4,8 +4,9 @@
  * into relay's per-million ModelPricing shape.
  *
  * Source of truth: vendor/litellm/model_prices_and_context_window.json
- * (a git submodule of BerriAI/litellm, auto-bumped by Dependabot). tsup inlines
- * the JSON at build time, so there is no runtime file dependency.
+ * (a vendored copy of BerriAI/litellm's price file, refreshed by the
+ * litellm-prices-sync workflow). tsup inlines the JSON at build time, so there
+ * is no runtime file dependency.
  *
  * Reason: LiteLLM stores cost PER TOKEN; relay bills PER MILLION tokens (×1e6).
  */
@@ -43,13 +44,16 @@ export const SERVED_MODELS: readonly string[] = [
   'gpt-5.4', 'gpt-4.1', 'gpt-4o', 'o4-mini',
   'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
   'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
-  'gemini-2.5-pro-preview', 'gemini-2.0-flash', 'deepseek-v3.2',
+  // NOTE: gemini-2.0-flash is deprecated by Google (shutdown ~2026-06-01). Kept
+  // here so any residual traffic is still priced correctly ($0.10/$0.40) rather
+  // than falling to the conservative DEFAULT_PRICING; remove once upstream drops
+  // it (missingServedModels() will flag it then).
+  'gemini-2.5-pro-preview', 'gemini-2.0-flash',
 ];
 
 /** relay model id -> LiteLLM key, for the few that don't match exactly. */
 export const ALIASES: Record<string, string> = {
   'gemini-2.5-pro-preview': 'gemini-2.5-pro',
-  'deepseek-v3.2': 'deepseek-chat',
 };
 
 function toMillion(perToken: number | undefined): number {
