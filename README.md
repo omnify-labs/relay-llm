@@ -172,7 +172,45 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 
 # Server
 PORT=8080
+
+# Hard window (ms) a run may keep spending past budget once admitted. Default 30 min.
+# See "Budget enforcement is per-run" below.
+RUN_ADMISSION_TTL_MS=1800000
 ```
+
+## Budget enforcement is per-run
+
+Budget is gated **once per agent run**, not on every LLM call. A run is identified by
+the `X-Dassi-Run-Id` header; the first call carrying a new run id is checked against
+the user's spend, and if there is budget left the run is *admitted* — its remaining
+calls skip the budget check, even as spend crosses the limit.
+
+This exists so a multi-step task is never cut off half-finished. Per-call enforcement
+meant a user whose credit ran out mid-task got a 402 on the next call and lost the
+run's partial work. Now the "out of credit" stop lands at a **task boundary**: the
+*next* run's first call is refused, before any visible work.
+
+Spend is still recorded on every call, so an admitted run simply overshoots and the
+following run is refused.
+
+Bounds on that overshoot:
+
+- **`RUN_ADMISSION_TTL_MS`** (default 30 min) is a hard cap, not an idle timer. A run
+  still active at expiry is re-checked: under budget it re-admits, over budget it stops.
+- **8 concurrent admitted runs per user.** Beyond that, runs simply are not admitted
+  and keep per-call gating. `runId` is client-supplied, so this caps both worst-case
+  overspend and the memory an attacker can pin.
+- **Admin writes revoke immediately.** `PUT /users/:user_id/budget` and
+  `DELETE /users/:user_id` drop the user's admissions, so lowering or zeroing a budget
+  takes effect on the user's very next call rather than after the window closes.
+
+Requests **without** an `X-Dassi-Run-Id` header keep per-call enforcement unchanged, so
+older clients are unaffected.
+
+**Limitations.** Admission state is in-memory and single-instance: a restart clears it,
+so an in-flight over-budget run can be re-checked and refused. Running more than one
+relay instance would need a shared store (e.g. Redis) or admission will be inconsistent
+across instances.
 
 ## Admin API
 

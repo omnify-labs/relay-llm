@@ -5,6 +5,7 @@ import {
   __resetAdmissionsForTests,
   admissionCountForTests,
   MAX_ADMITTED_RUNS_PER_USER,
+  revokeUser,
 } from '../billing/run-admission.js';
 
 const TTL = 1_800_000; // 30 min default
@@ -85,6 +86,40 @@ describe('run-admission', () => {
     // The cap is per user — a different user is unaffected.
     admitRun('u2', 'run-x', 0);
     expect(isRunAdmitted('u2', 'run-x', 0)).toBe(true);
+  });
+
+  it('revokeUser drops every admission for that user immediately', () => {
+    // Reason: an admin zeroing a budget to halt runaway spend must take effect now.
+    // Without this, an already-admitted run skips the budget check and keeps spending
+    // for the rest of its window, silently defeating the admin control.
+    admitRun('u1', 'run-a', 0);
+    admitRun('u1', 'run-b', 0);
+    admitRun('u2', 'run-c', 0);
+
+    revokeUser('u1');
+
+    expect(isRunAdmitted('u1', 'run-a', 0)).toBe(false);
+    expect(isRunAdmitted('u1', 'run-b', 0)).toBe(false);
+    // Other users are untouched.
+    expect(isRunAdmitted('u2', 'run-c', 0)).toBe(true);
+    expect(admissionCountForTests()).toBe(1);
+  });
+
+  it('revokeUser is a no-op for a user with no admissions', () => {
+    expect(() => revokeUser('nobody')).not.toThrow();
+    expect(admissionCountForTests()).toBe(0);
+  });
+
+  it('does not leak the bucket of a user who goes idle after expiry', () => {
+    // Reason: pruneUser only runs on that user's next admitRun, and isRunAdmitted was a
+    // pure read — so a user admitted once who never returns kept their bucket and its
+    // expired entries until process exit. The cap bounds entries per user, not the
+    // number of user buckets.
+    admitRun('idle-user', 'run-a', 0);
+    expect(admissionCountForTests()).toBe(1);
+    // Their window closes and they are checked once more; nothing should be retained.
+    expect(isRunAdmitted('idle-user', 'run-a', TTL + 1)).toBe(false);
+    expect(admissionCountForTests()).toBe(0);
   });
 
   it('frees cap space as windows close, without a global scan', () => {

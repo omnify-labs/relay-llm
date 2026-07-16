@@ -70,8 +70,34 @@ function pruneUser(userId: string, runs: Map<string, number>, now: number): void
  * @returns True when the run is admitted and unexpired.
  */
 export function isRunAdmitted(userId: string, runId: string, now: number = Date.now()): boolean {
-  const expiresAt = admitted.get(userId)?.get(runId);
-  return expiresAt !== undefined && now < expiresAt;
+  const runs = admitted.get(userId);
+  if (!runs) return false;
+  const expiresAt = runs.get(runId);
+  if (expiresAt === undefined) return false;
+  if (now >= expiresAt) {
+    // Reason: prune on the read path too. pruneUser only runs on that user's next
+    // admitRun, so a user admitted once who then goes idle would otherwise keep their
+    // bucket and its expired entries until process exit. The per-user cap bounds
+    // entries within a bucket, not the number of buckets.
+    runs.delete(runId);
+    if (runs.size === 0) admitted.delete(userId);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Drop every admission for a user, effective immediately.
+ *
+ * Reason: an admitted run skips the budget check for the rest of its window, so an
+ * admin zeroing a budget to halt runaway spend would otherwise be silently defeated
+ * for up to the full TTL. Call this right after any admin write that revokes or
+ * reduces a budget, so the user's next call is re-gated against the new value.
+ *
+ * @param userId - The user whose admissions to drop.
+ */
+export function revokeUser(userId: string): void {
+  admitted.delete(userId);
 }
 
 /**
