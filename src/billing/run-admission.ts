@@ -122,6 +122,10 @@ export function admitRun(userId: string, runId: string, now: number = Date.now()
   // new runs beyond the cap are refused.
   if (runs.size >= MAX_ADMITTED_RUNS_PER_USER && !runs.has(runId)) return;
   runs.set(runId, now + ADMISSION_TTL_MS);
+  // Reason: not redundant with line 118. pruneUser deletes the bucket from `admitted`
+  // whenever it empties — which is exactly a new user's first call (the bucket starts
+  // empty) and any call after all prior runs expired. Mutating `runs` in place is then
+  // not enough because `admitted` no longer references it; this re-inserts the bucket.
   admitted.set(userId, runs);
 }
 
