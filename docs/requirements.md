@@ -79,13 +79,40 @@ The proxy does **NOT** convert between API formats. Your application produces th
 - Extracts `user_id` from the JWT claims
 - Rejects expired/invalid tokens with `401 Unauthorized`
 
-### 4.3 Per-User Budget Enforcement
+### 4.3 Per-Run Budget Enforcement
 
-- **Before forwarding** each request, check the user's remaining budget:
-  - Query `user_billing` table for `user_id`
-  - If `spend >= max_budget`, reject with `402 Payment Required` and a JSON error body
-  - If user has no billing record, reject with `403 Forbidden`
-- Budget is denominated in **USD**
+Budget is gated **once per agent run**, not on every call, so a multi-step task is
+never interrupted mid-flight when credit runs out. A run is identified by the
+`X-Dassi-Run-Id` request header.
+
+- **On a run's first call** (a run id not currently admitted), check the budget:
+  - Query the `user_billing` table for `user_id`.
+  - If `spend >= max_budget`, reject with `402 Payment Required` and a JSON error body.
+  - If the user has no billing record, reject with `403 Forbidden`.
+  - Otherwise **admit** the run and forward.
+- **On subsequent calls of an admitted run**, forward without re-checking budget —
+  even once `spend` has crossed `max_budget`. The "out of credit" stop therefore lands
+  at a task boundary (the next run's first call), not mid-task.
+- **Spend is still recorded on every call** (see 4.4), so an admitted run overshoots
+  and the following run is refused at its first call.
+- Requests **without** an `X-Dassi-Run-Id` header keep per-call enforcement unchanged
+  (backward compatible with older clients).
+- Budget is denominated in **USD**.
+
+Bounds on overshoot:
+
+- **Hard admission window** `RUN_ADMISSION_TTL_MS` (default 30 min): a run still active
+  at expiry is re-checked — under budget it re-admits, over budget it stops.
+- **Per-user concurrency cap** (`MAX_ADMITTED_RUNS_PER_USER`): beyond it, further runs
+  are not admitted and keep per-call gating. `runId` is client-supplied, so this caps
+  both worst-case overspend and pinned memory.
+- **Admin writes revoke immediately**: setting/deleting a user's budget drops the
+  user's admissions so the change takes effect on their next call.
+
+Admission state is in-memory and single-instance; a restart clears it (an in-flight
+over-budget run may then be re-checked). Running more than one instance would need a
+shared store. See `README.md` → "Budget enforcement is per-run" and
+`src/billing/run-admission.ts`.
 
 ### 4.4 Usage Tracking & Token Logging
 
