@@ -12,6 +12,17 @@ import type { MiddlewareHandler } from 'hono';
 import { getUserBudget } from '../db/queries.js';
 import { isRunAdmitted, admitRun } from './run-admission.js';
 
+/**
+ * Budget check middleware.
+ *
+ * Gates a run's FIRST call on the user's spend vs budget, then admits the rest of that
+ * run without re-checking, so a task is never interrupted mid-flight when credit runs
+ * out. Requests without an `X-Dassi-Run-Id` header keep legacy per-call enforcement.
+ *
+ * @param c - Hono context; requires `userId` set by auth, reads the `X-Dassi-Run-Id` header.
+ * @param next - Downstream handler, invoked only when the request is allowed.
+ * @returns 402 when budget is exceeded, 403 when the user has no budget record, else void.
+ */
 export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
   const userId = c.get('userId') as string;
   const runId = c.req.header('x-dassi-run-id');

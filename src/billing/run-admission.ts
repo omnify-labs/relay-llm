@@ -20,33 +20,45 @@ const ADMISSION_TTL_MS =
   Number.isFinite(parsedTtl) && parsedTtl > 0 ? parsedTtl : DEFAULT_ADMISSION_TTL_MS;
 
 /**
- * Admitted runs keyed by user+run, valued by expiry.
+ * Most runs one user may hold admitted at once.
  *
- * Reason: keyed per RUN, not per user. Dassi serializes runs per tab group
- * (`navigator.locks` on `dassi-group-<id>`), not per user, so one user can have
- * concurrent runs — e.g. a schedule firing on one group while they work manually
- * in another. A per-user entry would let the newer run evict the older one, and
- * the older run's next call would be re-budget-checked and 402'd mid-task.
+ * Reason: `runId` is client-controlled, so without a cap any authenticated user who
+ * is under budget could flood distinct ids and pin an unbounded, attacker-controlled
+ * number of entries for a full TTL each. The cap bounds memory to (users x this) and
+ * doubles as the anti-abuse ceiling: worst-case overage is this many concurrent runs'
+ * spend. Comfortably above real usage — a user's concurrent runs are their open tab
+ * groups plus any schedule that fires in the same window.
  */
-const admitted = new Map<string, number>();
-
-/** Composite key; the NUL separator cannot occur in a uuid, so keys cannot collide. */
-function admissionKey(userId: string, runId: string): string {
-  return `${userId}\u0000${runId}`;
-}
+export const MAX_ADMITTED_RUNS_PER_USER = 8;
 
 /**
- * Drop admissions whose hard window has closed.
+ * Admitted runs: user -> (run -> expiry).
  *
- * Reason: keying per run means the map grows with run count rather than user
- * count, so a long-lived relay process needs a sweep. Called on admit (once per
- * run, not per call), which is cheap and keeps the map proportional to runs
- * currently in flight.
+ * Reason: nested per user, not a flat user+run key, so the cap check and the expiry
+ * sweep touch only one user's runs (at most MAX_ADMITTED_RUNS_PER_USER) instead of
+ * scanning every admission in the process. A flat map made each admit an O(n) full
+ * scan that pruned nothing during a burst — O(n^2) across a flood.
+ *
+ * Keyed per RUN, not one entry per user: Dassi serializes runs per tab group
+ * (`navigator.locks` on `dassi-group-<id>`), not per user, so one user can have
+ * concurrent runs — e.g. a schedule firing on one group while they work manually in
+ * another. A single per-user entry would let the newer run evict the older one, whose
+ * next call would then be re-budget-checked and 402'd mid-task.
  */
-function pruneExpired(now: number): void {
-  for (const [key, expiresAt] of admitted) {
-    if (now >= expiresAt) admitted.delete(key);
+const admitted = new Map<string, Map<string, number>>();
+
+/**
+ * Drop this user's closed windows, and the user entry itself once empty.
+ *
+ * @param userId - The authenticated user.
+ * @param runs - That user's run -> expiry map.
+ * @param now - Current time in ms.
+ */
+function pruneUser(userId: string, runs: Map<string, number>, now: number): void {
+  for (const [runId, expiresAt] of runs) {
+    if (now >= expiresAt) runs.delete(runId);
   }
+  if (runs.size === 0) admitted.delete(userId);
 }
 
 /**
@@ -58,20 +70,33 @@ function pruneExpired(now: number): void {
  * @returns True when the run is admitted and unexpired.
  */
 export function isRunAdmitted(userId: string, runId: string, now: number = Date.now()): boolean {
-  const expiresAt = admitted.get(admissionKey(userId, runId));
+  const expiresAt = admitted.get(userId)?.get(runId);
   return expiresAt !== undefined && now < expiresAt;
 }
 
 /**
  * Admit `runId` for `userId`, opening a fresh hard window.
  *
+ * Silently does not admit when the user is already at
+ * {@link MAX_ADMITTED_RUNS_PER_USER}. That is safe by construction: an unadmitted run
+ * simply keeps today's per-call budget gating.
+ *
  * @param userId - The authenticated user.
  * @param runId - Run id from the X-Dassi-Run-Id header.
  * @param now - Injectable clock for tests.
  */
 export function admitRun(userId: string, runId: string, now: number = Date.now()): void {
-  pruneExpired(now);
-  admitted.set(admissionKey(userId, runId), now + ADMISSION_TTL_MS);
+  let runs = admitted.get(userId);
+  if (!runs) {
+    runs = new Map();
+    admitted.set(userId, runs);
+  }
+  pruneUser(userId, runs, now);
+  // Reason: refreshing a run we already track must not be capped out — only genuinely
+  // new runs beyond the cap are refused.
+  if (runs.size >= MAX_ADMITTED_RUNS_PER_USER && !runs.has(runId)) return;
+  runs.set(runId, now + ADMISSION_TTL_MS);
+  admitted.set(userId, runs);
 }
 
 /** Test-only: clear all admissions. */
@@ -79,7 +104,9 @@ export function __resetAdmissionsForTests(): void {
   admitted.clear();
 }
 
-/** Test-only: number of tracked admissions (asserts the sweep bounds the map). */
+/** Test-only: total tracked admissions (asserts the sweep and cap bound the map). */
 export function admissionCountForTests(): number {
-  return admitted.size;
+  let total = 0;
+  for (const runs of admitted.values()) total += runs.size;
+  return total;
 }
