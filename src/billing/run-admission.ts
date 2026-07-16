@@ -130,7 +130,11 @@ export function __resetAdmissionsForTests(): void {
   admitted.clear();
 }
 
-/** Test-only: total tracked admissions (asserts the sweep and cap bound the map). */
+/**
+ * Test-only: total tracked admissions (asserts the sweep and cap bound the map).
+ *
+ * @returns Total number of run-level entries currently tracked across all users.
+ */
 export function admissionCountForTests(): number {
   let total = 0;
   for (const runs of admitted.values()) total += runs.size;
