@@ -28,7 +28,7 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
   const runId = c.req.header('x-dassi-run-id');
 
   try {
-    // In-flight admitted run → allow without re-checking budget, so a task is
+    // Reason: in-flight admitted run — allow without re-checking budget so a task is
     // never interrupted mid-run once it has been admitted.
     if (runId && isRunAdmitted(userId, runId)) {
       await next();
@@ -45,7 +45,7 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
       return c.json({ error: 'Budget exceeded' }, 402);
     }
 
-    // New run (or a run past its admission window) with budget available →
+    // Reason: new run (or a run past its admission window) with budget available —
     // admit it so its remaining calls are not interrupted mid-task.
     if (runId) admitRun(userId, runId);
 

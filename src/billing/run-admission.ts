@@ -129,6 +129,20 @@ export function admitRun(userId: string, runId: string, now: number = Date.now()
   admitted.set(userId, runs);
 }
 
+/**
+ * Sweep every user's expired admissions (and empty buckets).
+ *
+ * Reason: the read/admit paths only prune a user when that user makes another call, so
+ * a user admitted once who never returns keeps their bucket for the process lifetime.
+ * On a long-lived instance the bucket count grows with every distinct user ever
+ * admitted; a periodic call to this reclaims them. Wired to a timer in `index.ts`.
+ *
+ * @param now - Injectable clock for tests.
+ */
+export function pruneAllUsers(now: number = Date.now()): void {
+  for (const [userId, runs] of admitted) pruneUser(userId, runs, now);
+}
+
 /** Test-only: clear all admissions. */
 export function __resetAdmissionsForTests(): void {
   admitted.clear();

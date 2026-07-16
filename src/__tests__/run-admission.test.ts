@@ -6,6 +6,7 @@ import {
   admissionCountForTests,
   MAX_ADMITTED_RUNS_PER_USER,
   revokeUser,
+  pruneAllUsers,
 } from '../billing/run-admission.js';
 
 const TTL = 1_800_000; // 30 min default
@@ -120,6 +121,27 @@ describe('run-admission', () => {
     // Their window closes and they are checked once more; nothing should be retained.
     expect(isRunAdmitted('idle-user', 'run-a', TTL + 1)).toBe(false);
     expect(admissionCountForTests()).toBe(0);
+  });
+
+  it('pruneAllUsers reclaims buckets of users who went idle and never returned', () => {
+    // Reason: the read/admit paths only prune a user when THAT user makes another call.
+    // A user admitted once who never returns would otherwise keep their bucket for the
+    // process lifetime. On a long-lived (non-scale-to-zero) instance the bucket count
+    // grows with every distinct user ever admitted; a periodic sweep reclaims them.
+    admitRun('gone-1', 'run-a', 0);
+    admitRun('gone-2', 'run-b', 0);
+    admitRun('active', 'run-c', TTL); // still within its own window at sweep time
+    expect(admissionCountForTests()).toBe(3);
+
+    pruneAllUsers(2 * TTL); // gone-1/gone-2 expired; active's window (TTL..2*TTL) closed too
+    expect(admissionCountForTests()).toBe(0);
+  });
+
+  it('pruneAllUsers keeps still-live admissions', () => {
+    admitRun('u1', 'run-a', 0);
+    pruneAllUsers(TTL - 1); // still inside the window
+    expect(isRunAdmitted('u1', 'run-a', TTL - 1)).toBe(true);
+    expect(admissionCountForTests()).toBe(1);
   });
 
   it('frees cap space as windows close, without a global scan', () => {
