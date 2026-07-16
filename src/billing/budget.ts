@@ -1,6 +1,8 @@
 /**
  * Budget enforcement middleware.
- * Checks per-user spend against their budget before forwarding requests.
+ * Per-RUN enforcement: a run is budget-gated once at its first call, then its
+ * subsequent calls pass without re-checking (no mid-task 402). Requests with
+ * no X-Dassi-Run-Id header keep the legacy per-call behavior.
  *
  * Design: Fail closed — if the budget check fails (DB error), reject the request
  * to prevent runaway spend. This is intentional.
@@ -8,16 +10,31 @@
 
 import type { MiddlewareHandler } from 'hono';
 import { getUserBudget } from '../db/queries.js';
+import { isRunAdmitted, admitRun } from './run-admission.js';
 
 /**
  * Budget check middleware.
- * Queries the user's current spend and budget.
- * Rejects with 402 if budget exceeded, 403 if no budget record.
+ *
+ * Gates a run's FIRST call on the user's spend vs budget, then admits the rest of that
+ * run without re-checking, so a task is never interrupted mid-flight when credit runs
+ * out. Requests without an `X-Dassi-Run-Id` header keep legacy per-call enforcement.
+ *
+ * @param c - Hono context; requires `userId` set by auth, reads the `X-Dassi-Run-Id` header.
+ * @param next - Downstream handler, invoked only when the request is allowed.
+ * @returns 402 when budget is exceeded, 403 when the user has no budget record, else void.
  */
 export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
   const userId = c.get('userId') as string;
+  const runId = c.req.header('x-dassi-run-id');
 
   try {
+    // Reason: in-flight admitted run — allow without re-checking budget so a task is
+    // never interrupted mid-run once it has been admitted.
+    if (runId && isRunAdmitted(userId, runId)) {
+      await next();
+      return;
+    }
+
     const budget = await getUserBudget(userId);
 
     if (!budget) {
@@ -27,6 +44,10 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
     if (budget.spend >= budget.budget) {
       return c.json({ error: 'Budget exceeded' }, 402);
     }
+
+    // Reason: new run (or a run past its admission window) with budget available —
+    // admit it so its remaining calls are not interrupted mid-task.
+    if (runId) admitRun(userId, runId);
 
     await next();
   } catch (error) {

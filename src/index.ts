@@ -12,6 +12,7 @@ import { authMiddleware } from './auth/jwt.js';
 import { adminAuthMiddleware } from './admin/middleware.js';
 import { adminApp } from './admin/handler.js';
 import { budgetMiddleware } from './billing/budget.js';
+import { pruneAllUsers } from './billing/run-admission.js';
 import { loadEnv } from './config/env.js';
 
 const env = loadEnv();
@@ -47,3 +48,10 @@ console.log(`[Relay] Starting on port ${port}`);
 serve({ fetch: app.fetch, port }, () => {
   console.log(`[Relay] Listening on http://localhost:${port}`);
 });
+
+// Reason: reclaim admission buckets of users who were admitted once and never returned.
+// The request paths only prune a user on that user's next call, so on a long-lived
+// instance the bucket count would otherwise grow with every distinct user ever admitted.
+// .unref() so this timer never keeps the process alive on its own.
+const ADMISSION_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+setInterval(() => pruneAllUsers(), ADMISSION_SWEEP_INTERVAL_MS).unref();

@@ -5,6 +5,7 @@
 
 import { Hono } from 'hono';
 import { setUserBudget, deleteUserBudget } from '../db/queries.js';
+import { revokeUser } from '../billing/run-admission.js';
 
 export const adminApp = new Hono();
 
@@ -30,6 +31,11 @@ adminApp.put('/users/:user_id/budget', async (c) => {
 
   try {
     await setUserBudget(userId, body.budget, body.reset_spend ?? false);
+    // Reason: drop any in-flight run admission so the new budget is enforced on the
+    // user's very next call. An admitted run skips the budget check for the rest of
+    // its window, so lowering a budget to halt spend would otherwise not bite for up
+    // to the full admission TTL.
+    revokeUser(userId);
 
     console.log(
       `[Relay] Admin: set budget for user=${userId} budget=$${body.budget} reset_spend=${body.reset_spend ?? false}`,
@@ -54,6 +60,11 @@ adminApp.delete('/users/:user_id', async (c) => {
 
   try {
     const deleted = await deleteUserBudget(userId);
+
+    // Reason: revoke regardless of `deleted` — the goal is that no admission outlives
+    // the record. A 404 here means there was no budget row, but a stale admission for
+    // that id must still not keep skipping the budget check.
+    revokeUser(userId);
 
     if (!deleted) {
       return c.json({ error: 'User not found' }, 404);

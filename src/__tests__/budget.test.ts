@@ -13,6 +13,7 @@ vi.mock('../db/queries.js', () => ({
 }));
 
 import { budgetMiddleware } from '../billing/budget.js';
+import { admitRun, __resetAdmissionsForTests } from '../billing/run-admission.js';
 
 /**
  * Build a test app with budget middleware.
@@ -34,6 +35,8 @@ function buildTestApp(): Hono {
 beforeEach(() => {
   mockGetUserBudget.mockReset();
 });
+
+beforeEach(() => __resetAdmissionsForTests());
 
 describe('budgetMiddleware', () => {
   it('allows request when spend is under budget', async () => {
@@ -94,5 +97,42 @@ describe('budgetMiddleware', () => {
 
     await app.request('/test');
     expect(mockGetUserBudget).toHaveBeenCalledWith('user-42');
+  });
+});
+
+/**
+ * Build a test app that also forwards the X-Dassi-Run-Id header, so the
+ * middleware sees run ids exactly as in production.
+ */
+describe('budgetMiddleware — per-run admission', () => {
+  it('admits a new run when budget is available (first call passes)', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10 });
+    const app = buildTestApp();
+    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-1' } });
+    expect(res.status).toBe(200);
+  });
+
+  it('bypasses the budget query for an already-admitted in-flight run', async () => {
+    // Pre-admit the run; even though spend >= budget, the in-flight call must pass.
+    admitRun('user-42', 'run-1');
+    const app = buildTestApp();
+    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-1' } });
+    expect(res.status).toBe(200);
+    // The core guarantee: no budget check happened for the in-flight call.
+    expect(mockGetUserBudget).not.toHaveBeenCalled();
+  });
+
+  it('blocks a NEW run at its first call when spend is exhausted', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15 });
+    const app = buildTestApp();
+    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-2' } });
+    expect(res.status).toBe(402);
+  });
+
+  it('keeps legacy per-call behavior when no run-id header is present', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15 });
+    const app = buildTestApp();
+    const res = await app.request('/test');
+    expect(res.status).toBe(402);
   });
 });
