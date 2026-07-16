@@ -19,7 +19,21 @@ This repository hosts **Relay LLM** — a thin, transparent LLM proxy that forwa
 ### Fail-Closed on Budget, Fail-Open on Logging
 - If the budget check DB query fails → **reject the request** (prevent runaway spend)
 - If usage logging fails → **request still succeeds** (log async, don't block)
-- Never sacrifice billing safety for availability.
+- Never sacrifice billing safety for availability. "Billing safety" means **bounded,
+  accounted spend** — not a hard per-call ceiling.
+
+### Budget is enforced per run, not per call
+- Budget is gated **once, at a run's first call** (identified by `X-Dassi-Run-Id`).
+  Once admitted, a run's later calls are forwarded **without re-checking budget**, so a
+  multi-step task is never cut off mid-flight when credit runs out. The "out of credit"
+  stop lands at the next run's first call, a clean task boundary.
+- This is a **deliberate, bounded** trade-off, not a hole in the rule above. Spend is
+  still recorded on **every** call (fully accounted, still fail-closed on a DB error),
+  and overshoot is capped by: a hard admission window (`RUN_ADMISSION_TTL_MS`, 30 min),
+  a per-user concurrent-admission cap, and immediate revocation on admin budget writes.
+- Requests **without** `X-Dassi-Run-Id` keep strict per-call enforcement (older clients).
+- See `src/billing/run-admission.ts`, `budget.ts`, and README → "Budget enforcement is
+  per-run".
 
 ### Type-Safe, Modular Boundaries
 - Type everything (requests, responses, configs). Use strict TypeScript — no `any` unless absolutely necessary with a comment explaining why.

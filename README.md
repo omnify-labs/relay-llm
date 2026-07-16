@@ -256,7 +256,8 @@ src/
     handler.ts          # Budget management endpoints
     middleware.ts       # Admin secret auth
   billing/
-    budget.ts           # Per-user budget enforcement
+    budget.ts           # Per-run budget admission (gate once at run start)
+    run-admission.ts    # In-memory admitted-run store (TTL + per-user cap)
     usage.ts            # Async token usage logging
     pricing.ts          # Model pricing table
   db/
