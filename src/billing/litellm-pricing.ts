@@ -42,7 +42,12 @@ const M = 1_000_000;
  */
 export const SERVED_MODELS: readonly string[] = [
   'gpt-5.4', 'gpt-4.1', 'gpt-4o', 'o4-mini',
+  // 2026-07 lineup refresh: claude-sonnet-5 is at Anthropic's introductory
+  // $2/$10 rate in LiteLLM (standard $3/$15 from 2026-09-01) — the price will
+  // follow automatically on the next vendored-table sync.
+  'claude-opus-5', 'claude-sonnet-5',
   'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
+  'gemini-3.6-flash',
   'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
   // NOTE: gemini-2.0-flash is deprecated by Google (shutdown ~2026-06-01). Kept
   // here so any residual traffic is still priced correctly ($0.10/$0.40) rather

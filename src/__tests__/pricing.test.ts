@@ -29,6 +29,28 @@ describe('calculateCost', () => {
     expect(cost).not.toBeCloseTo(3.0 + 15.0, 4); // not the DEFAULT_PRICING fallback
   });
 
+  it('2026-07 lineup models resolve to real (non-default) prices', () => {
+    // Reason: these back the refreshed managed model list (dassi PR #2159) —
+    // a missing entry would silently bill at the conservative DEFAULT_PRICING.
+    for (const m of ['claude-opus-5', 'claude-sonnet-5', 'gemini-3.6-flash']) {
+      const cost = calculateCost(m, 1_000_000, 1_000_000, 0, 0);
+      expect(PRICING[m], `${m} must be in the served pricing table`).toBeDefined();
+      expect(cost).toBeCloseTo(io(m, 1_000_000, 1_000_000), 4);
+      expect(cost).not.toBeCloseTo(3.0 + 15.0, 4); // not the DEFAULT_PRICING fallback
+    }
+  });
+
+  it('claude-opus-5 applies Anthropic cache read + write rates', () => {
+    const p = PRICING['claude-opus-5'];
+    const expected =
+      (10_000 / 1e6) * p.inputPerMillion +
+      (30_000 / 1e6) * p.cachedInputPerMillion +
+      (10_000 / 1e6) * p.cacheCreationPerMillion +
+      (5_000 / 1e6) * p.outputPerMillion;
+    const cost = calculateCost('claude-opus-5', 50_000, 5_000, 30_000, 10_000);
+    expect(cost).toBeCloseTo(expected, 6);
+  });
+
   it('applies gemini-3.5-flash cached input discount (90% off)', () => {
     // 100K total input, 90K cached, 1K output
     // non-cached: 10K × inputPerMillion/M
