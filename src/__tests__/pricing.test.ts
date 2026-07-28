@@ -32,11 +32,15 @@ describe('calculateCost', () => {
   it('2026-07 lineup models resolve to real (non-default) prices', () => {
     // Reason: these back the refreshed managed model list (dassi PR #2159) —
     // a missing entry would silently bill at the conservative DEFAULT_PRICING.
+    // PRICING only contains served models that resolved to a real LiteLLM
+    // entry, so membership alone proves the fallback isn't in play. Do NOT
+    // compare against the $3/$15 sentinel here: claude-sonnet-5 moves from
+    // its introductory $2/$10 to the standard $3/$15 on a future price sync,
+    // where 1M+1M would legitimately equal the sentinel and false-fail.
     for (const m of ['claude-opus-5', 'claude-sonnet-5', 'gemini-3.6-flash']) {
-      const cost = calculateCost(m, 1_000_000, 1_000_000, 0, 0);
       expect(PRICING[m], `${m} must be in the served pricing table`).toBeDefined();
+      const cost = calculateCost(m, 1_000_000, 1_000_000, 0, 0);
       expect(cost).toBeCloseTo(io(m, 1_000_000, 1_000_000), 4);
-      expect(cost).not.toBeCloseTo(3.0 + 15.0, 4); // not the DEFAULT_PRICING fallback
     }
   });
 
