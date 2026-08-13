@@ -48,6 +48,14 @@ export const SERVED_MODELS: readonly string[] = [
   'claude-opus-5', 'claude-sonnet-5',
   'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
   'gemini-3.6-flash',
+  // 2026-08 lineup: gemini-3.5-flash-lite is the managed budget tier (dassi PR
+  // #2541). At $0.30/$2.50 with a $0.03 cache read it is 5x cheaper on input
+  // than gemini-3.5-flash — the point of adding it. Serving it WITHOUT this
+  // entry would be worse than not serving it at all: buildPricingTable() only
+  // covers SERVED_MODELS, so it would fall to DEFAULT_PRICING at $3.00/M input
+  // and, critically, $3.00/M on cached reads (no discount) — ~100x the real
+  // cached rate on the long, heavily-cached browser sessions it is meant for.
+  'gemini-3.5-flash-lite',
   'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
   // NOTE: gemini-2.0-flash is deprecated by Google (shutdown ~2026-06-01). Kept
   // here so any residual traffic is still priced correctly ($0.10/$0.40) rather
