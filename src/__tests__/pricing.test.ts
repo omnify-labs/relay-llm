@@ -44,6 +44,39 @@ describe('calculateCost', () => {
     }
   });
 
+  it('gemini-3.5-flash-lite resolves to real rates, with a non-zero cache read', () => {
+    // Reason: this is the managed budget tier (dassi PR #2541), and its whole
+    // point is the cheap cache read. Assert the absolute rates, not just
+    // membership: `normalizeEntry()` maps a missing/renamed cache key to 0 via
+    // `toMillion(undefined)`, which would bill every cached token at $0 —
+    // silently free, and invisible to the generic `inputPerMillion > 0` check.
+    // That is the exact inverse of the DEFAULT_PRICING overcharge this model
+    // was added to avoid, so both directions are pinned here.
+    const p = PRICING['gemini-3.5-flash-lite'];
+    expect(p, 'gemini-3.5-flash-lite must be in the served pricing table').toBeDefined();
+    expect(p.inputPerMillion).toBeCloseTo(0.3, 6);
+    expect(p.outputPerMillion).toBeCloseTo(2.5, 6);
+    expect(p.cachedInputPerMillion).toBeCloseTo(0.03, 6);
+    expect(p.cachedInputPerMillion).toBeGreaterThan(0);
+  });
+
+  it('applies gemini-3.5-flash-lite cached input discount (90% off)', () => {
+    // 100K total input, 90K cached, 1K output — same shape as the 3.5-flash
+    // case above, so the two budget/mid tiers stay directly comparable.
+    const p = PRICING['gemini-3.5-flash-lite'];
+    const expected =
+      (10_000 / 1e6) * p.inputPerMillion +
+      (90_000 / 1e6) * p.cachedInputPerMillion +
+      (1_000 / 1e6) * p.outputPerMillion;
+    const cost = calculateCost('gemini-3.5-flash-lite', 100_000, 1_000, 90_000, 0);
+    expect(cost).toBeCloseTo(expected, 6);
+    // Reason: failure case — an unserved id falls to DEFAULT_PRICING, which
+    // charges cached reads at the full $3/M. The budget tier must be strictly
+    // cheaper on this shape or the entry is not doing its job.
+    const unserved = calculateCost('gemini-3.5-flash-lite-typo', 100_000, 1_000, 90_000, 0);
+    expect(cost).toBeLessThan(unserved);
+  });
+
   it('claude-opus-5 applies Anthropic cache read + write rates', () => {
     const p = PRICING['claude-opus-5'];
     const expected =
