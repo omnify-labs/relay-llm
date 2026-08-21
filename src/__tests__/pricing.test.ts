@@ -74,6 +74,22 @@ describe('calculateCost', () => {
     expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
   });
 
+  it('gemini-3.6-flash resolves to real rates, with a non-zero cache read', () => {
+    // Reason: Google halved 3.6 in the 2026-08 refresh. The vendored table carried
+    // the old $1.50/$7.50 rates for weeks and billed managed users at 2× against
+    // their budgets. The generic loop (L40–44) checks `calculateCost(m, …) ≈ io(m, …)`
+    // — but both sides read `PRICING[m]`, so the assertion is tautological on values.
+    // A future sync restoring 3.6 to $1.50/$7.50 would pass the loop. This block
+    // cannot be caught by generic assertions; pinning the absolute rates here
+    // catches any regression to the old billing bug.
+    const p = PRICING['gemini-3.6-flash'];
+    expect(p, 'gemini-3.6-flash must be in the served pricing table').toBeDefined();
+    expect(p.inputPerMillion).toBeCloseTo(0.75, 6);
+    expect(p.outputPerMillion).toBeCloseTo(3.75, 6);
+    expect(p.cachedInputPerMillion).toBeCloseTo(0.075, 6);
+    expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
+  });
+
   it('applies gemini-3.5-flash-lite cached input discount (90% off)', () => {
     // 100K total input, 90K cached, 1K output — same shape as the 3.5-flash
     // case above, so the two budget/mid tiers stay directly comparable.
