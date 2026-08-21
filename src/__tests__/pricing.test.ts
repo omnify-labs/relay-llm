@@ -60,6 +60,20 @@ describe('calculateCost', () => {
     expect(p.cachedInputPerMillion).toBeGreaterThan(0);
   });
 
+  it('gemini-3.7-flash resolves to real rates, with a non-zero cache read', () => {
+    // Reason: this is the cache-heavy managed default, and any silent $0
+    // cached rate would under-bill every long session. Assert the absolute rates,
+    // not just membership: `normalizeEntry()` maps a missing/renamed cache key to 0
+    // via `toMillion(undefined)`, which would bill cached tokens at $0 — invisible
+    // to the generic `inputPerMillion > 0` check. Both directions are pinned.
+    const p = PRICING['gemini-3.7-flash'];
+    expect(p, 'gemini-3.7-flash must be in the served pricing table').toBeDefined();
+    expect(p.inputPerMillion).toBeCloseTo(0.75, 6);
+    expect(p.outputPerMillion).toBeCloseTo(3.75, 6);
+    expect(p.cachedInputPerMillion).toBeCloseTo(0.075, 6);
+    expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
+  });
+
   it('applies gemini-3.5-flash-lite cached input discount (90% off)', () => {
     // 100K total input, 90K cached, 1K output — same shape as the 3.5-flash
     // case above, so the two budget/mid tiers stay directly comparable.
