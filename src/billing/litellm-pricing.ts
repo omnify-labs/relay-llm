@@ -47,6 +47,14 @@ export const SERVED_MODELS: readonly string[] = [
   // follow automatically on the next vendored-table sync.
   'claude-opus-5', 'claude-sonnet-5',
   'claude-opus-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
+  // 2026-08 lineup: gemini-3.7-flash supersedes 3.6 as the managed default
+  // (dassi). Google priced it at HALF of 3.6's original rate — $0.75/$3.75 with a
+  // $0.075 cache read — and, in the same upstream refresh, halved 3.6 to match.
+  // Serving 3.7 without this entry would bill it at DEFAULT_PRICING ($3.00/M
+  // input, and $3.00/M on cached reads with no discount): 4x the real input rate
+  // and 40x the real cached rate on exactly the long, heavily-cached browser
+  // sessions it is meant for.
+  'gemini-3.7-flash',
   'gemini-3.6-flash',
   // 2026-08 lineup: gemini-3.5-flash-lite is the managed budget tier (dassi PR
   // #2541). At $0.30/$2.50 with a $0.03 cache read it is 5x cheaper on input
