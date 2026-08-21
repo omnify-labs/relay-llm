@@ -5,8 +5,12 @@ on:
     branches: [main]
     paths:
       - "src/**"
-      - "vendor/litellm"
-      - ".gitmodules"
+      # Reason: vendor/litellm was a submodule (a gitlink FILE at exactly this
+      # path) until #10 replaced it with a vendored JSON directory. A bare
+      # directory path matches nothing in a GitHub path filter, so a
+      # price-sync-only change — the exact output of litellm-prices-sync.yml —
+      # would merge without ever deploying. Match the tree instead.
+      - "vendor/litellm/**"
       - "Dockerfile"
       - "package.json"
       - "pnpm-lock.yaml"
