@@ -133,6 +133,27 @@ describe('logUsage', () => {
     consoleSpy.mockRestore();
   });
 
+  it('normalizes non-Error rejections into readable log messages', async () => {
+    // Reason: covers retryAsync's non-Error branch — a driver can reject with a
+    // bare string/object; retryAsync wraps it in `new Error(String(...))` so the
+    // log path never crashes on `.message` and still carries the reason text.
+    mockIncrementUserSpend.mockRejectedValue('string failure');
+    mockInsertUsageLog.mockRejectedValue({ code: 'ECONNRESET' });
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await logUsage(baseRecord);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to increment spend after 3 attempts: string failure'),
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to insert usage log after 3 attempts: [object Object]'),
+    );
+
+    consoleSpy.mockRestore();
+  });
+
   it('does not throw even when both operations fail (fail-open)', async () => {
     mockInsertUsageLog.mockRejectedValue(new Error('db down'));
     mockIncrementUserSpend.mockRejectedValue(new Error('db down'));

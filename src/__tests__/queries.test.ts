@@ -95,6 +95,15 @@ describe('getUserBudget', () => {
     expect(result).toBeNull();
   });
 
+  it('coerces null/unparseable budget columns to 0 instead of NaN', async () => {
+    // Reason: covers the `parseFloat(...) || 0` fallback — a NaN here would make
+    // the fail-closed `spend >= budget` comparison in budgetMiddleware always
+    // false and silently unlimit the user.
+    mockSqlFn.mockResolvedValueOnce([{ budget: null, spend: 'not-a-number' }]);
+    const result = await getUserBudget('u1');
+    expect(result).toEqual({ budget: 0, spend: 0 });
+  });
+
   it('propagates a DB error', async () => {
     mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
     await expect(getUserBudget('u1')).rejects.toThrow('connection lost');
