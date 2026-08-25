@@ -5,7 +5,7 @@
  */
 
 import { insertUsageLog, incrementUserSpend } from '../db/queries.js';
-import { calculateCost } from './pricing.js';
+import { calculateCostMicroUsd } from './pricing.js';
 import type { ProviderName } from '../proxy/providers.js';
 
 export interface UsageRecord {
@@ -30,24 +30,29 @@ export interface UsageRecord {
  * insertUsageLog fails, retrying both would double-charge the user.
  */
 export async function logUsage(record: UsageRecord): Promise<void> {
-  const costUsd = calculateCost(
-    record.model,
-    record.inputTokens,
-    record.outputTokens,
-    record.cachedInputTokens,
-    record.cacheCreationTokens,
+  // Reason: billing math stays in integer micro-USD end-to-end; the only float
+  // rendering of this value is the log line below. Number() is safe — µ$ amounts
+  // are far below 2^53.
+  const costMicroUsd = Number(
+    calculateCostMicroUsd(
+      record.model,
+      record.inputTokens,
+      record.outputTokens,
+      record.cachedInputTokens,
+      record.cacheCreationTokens,
+    ),
   );
   const totalTokens = record.inputTokens + record.outputTokens;
 
   // Run both independently so a failure in one doesn't block or duplicate the other
   const [spendResult, logResult] = await Promise.allSettled([
-    retryAsync(() => incrementUserSpend(record.userId, costUsd), 3),
+    retryAsync(() => incrementUserSpend(record.userId, costMicroUsd), 3),
     retryAsync(
       () =>
         insertUsageLog({
           ...record,
           totalTokens,
-          costUsd,
+          costMicroUsd,
         }),
       3,
     ),
@@ -56,7 +61,7 @@ export async function logUsage(record: UsageRecord): Promise<void> {
   if (spendResult.status === 'fulfilled' && logResult.status === 'fulfilled') {
     console.log(
       `[Relay] Usage logged: user=${record.userId.slice(0, 8)} provider=${record.provider} model=${record.model} ` +
-        `in=${record.inputTokens} cached=${record.cachedInputTokens} out=${record.outputTokens} cost=$${costUsd.toFixed(6)} latency=${record.latencyMs}ms`,
+        `in=${record.inputTokens} cached=${record.cachedInputTokens} out=${record.outputTokens} cost=$${(costMicroUsd / 1e6).toFixed(6)} latency=${record.latencyMs}ms`,
     );
   } else {
     if (spendResult.status === 'rejected') {

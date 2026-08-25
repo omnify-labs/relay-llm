@@ -18,7 +18,8 @@ export interface UsageLogInsert {
   totalTokens: number;
   cachedInputTokens: number;
   cacheCreationTokens: number;
-  costUsd: number;
+  /** Request cost in integer micro-USD (1e-6 $) — converted to USD in SQL. */
+  costMicroUsd: number;
   requestId: string;
   latencyMs: number;
   statusCode: number;
@@ -63,7 +64,7 @@ export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
       ${record.userId}, ${record.provider}, ${record.model},
       ${record.inputTokens}, ${record.outputTokens}, ${record.totalTokens},
       ${record.cachedInputTokens}, ${record.cacheCreationTokens},
-      ${record.costUsd}, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
+      ${record.costMicroUsd}::numeric / 1000000, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
     )
   `;
 }
@@ -73,13 +74,17 @@ export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
  * Uses atomic SQL increment to avoid race conditions.
  *
  * @param userId - User ID from JWT sub claim
- * @param amount - Amount in USD to add to spend
+ * @param costMicroUsd - Amount in integer micro-USD (1e-6 $) to add to spend
  */
-export async function incrementUserSpend(userId: string, amount: number): Promise<void> {
+export async function incrementUserSpend(userId: string, costMicroUsd: number): Promise<void> {
   const sql = getDb();
+  // Reason: trunc(…, 4) rounds each charge DOWN to the ledger's $0.0001 quantum —
+  // an explicit user-favoring policy, replacing the implicit half-up rounding the
+  // NUMERIC(10,4) column would otherwise apply on store. The /1000000 division is
+  // exact (power of ten) in NUMERIC.
   await sql`
     UPDATE user_budgets
-    SET spend = spend + ${amount}, updated_at = NOW()
+    SET spend = spend + trunc(${costMicroUsd}::numeric / 1000000, 4), updated_at = NOW()
     WHERE user_id = ${userId}
   `;
 }

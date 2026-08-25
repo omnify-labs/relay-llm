@@ -64,7 +64,7 @@ src/
     budget.ts           # Per-run budget admission middleware (gate once at run start)
     run-admission.ts    # In-memory admitted-run store (TTL + per-user cap)
     usage.ts            # Async token usage logging with retry
-    pricing.ts          # Model pricing table for cost calculation
+    pricing.ts          # Model pricing table; calculateCostMicroUsd (integer µ$ billing path)
   config/
     env.ts              # Environment variable loading + validation
   db/

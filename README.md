@@ -66,6 +66,9 @@ The trade-off is explicit: you send requests in each provider's **native format*
 - Forwards requests byte-for-byte to the provider
 - Streams responses byte-for-byte back to the client
 - Extracts token counts asynchronously (never blocks the response)
+- Prices each request in exact integer micro-USD (BigInt multiply-adds, one floor
+  division), and truncates each ledger increment down to $0.0001 -- rounding always
+  favors the user, never the house
 - Logs usage to Postgres
 
 **What RelayLLM does NOT do:**

@@ -14,7 +14,7 @@ vi.mock('../db/queries.js', () => ({
 }));
 
 vi.mock('../billing/pricing.js', () => ({
-  calculateCost: vi.fn().mockReturnValue(0.005),
+  calculateCostMicroUsd: vi.fn().mockReturnValue(5000n), // 5000 µ$ = $0.005
 }));
 
 import { logUsage, type UsageRecord } from '../billing/usage.js';
@@ -44,14 +44,14 @@ describe('logUsage', () => {
   it('calls insertUsageLog and incrementUserSpend on success', async () => {
     await logUsage(baseRecord);
 
-    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-abc-123', 0.005);
+    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-abc-123', 5000);
     expect(mockInsertUsageLog).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'user-abc-123',
         provider: 'openai',
         model: 'gpt-4o',
         totalTokens: 150,
-        costUsd: 0.005,
+        costMicroUsd: 5000,
       }),
     );
   });

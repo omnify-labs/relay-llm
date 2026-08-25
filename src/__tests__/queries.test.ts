@@ -12,7 +12,14 @@ vi.mock('../db/client.js', () => ({
   getDb: () => mockSqlFn,
 }));
 
-import { setUserBudget, deleteUserBudget, getUserBudget, incrementUserSpend } from '../db/queries.js';
+import {
+  setUserBudget,
+  deleteUserBudget,
+  getUserBudget,
+  incrementUserSpend,
+  insertUsageLog,
+  type UsageLogInsert,
+} from '../db/queries.js';
 
 beforeEach(() => {
   mockSqlFn.mockReset();
@@ -97,8 +104,21 @@ describe('getUserBudget', () => {
 describe('incrementUserSpend', () => {
   it('calls SQL update without error', async () => {
     mockSqlFn.mockResolvedValueOnce([]);
-    await incrementUserSpend('u1', 0.05);
+    await incrementUserSpend('u1', 59_511);
     expect(mockSqlFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('truncates (rounds DOWN) the micro-USD amount in SQL, never half-up', async () => {
+    // Reason: the round-down-in-the-user's-favor policy lives in the SQL text —
+    // pin it so a refactor back to a bare `spend + ${amount}` (implicit half-up
+    // NUMERIC rounding) fails loudly.
+    mockSqlFn.mockResolvedValueOnce([]);
+    await incrementUserSpend('u1', 59_511);
+    const [strings, ...values] = mockSqlFn.mock.calls[0];
+    const sqlText = (strings as string[]).join('?');
+    expect(sqlText).toContain('trunc(');
+    expect(sqlText).toContain('/ 1000000, 4)');
+    expect(values).toContain(59_511);
   });
 
   it('handles zero amount', async () => {
@@ -109,6 +129,39 @@ describe('incrementUserSpend', () => {
 
   it('propagates a DB error', async () => {
     mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
-    await expect(incrementUserSpend('u1', 0.05)).rejects.toThrow('connection lost');
+    await expect(incrementUserSpend('u1', 59_511)).rejects.toThrow('connection lost');
+  });
+});
+
+describe('insertUsageLog', () => {
+  const record: UsageLogInsert = {
+    userId: 'u1',
+    provider: 'anthropic',
+    model: 'claude-sonnet-4-5',
+    inputTokens: 18_452,
+    outputTokens: 2_437,
+    totalTokens: 20_889,
+    cachedInputTokens: 12_000,
+    cacheCreationTokens: 0,
+    costMicroUsd: 59_511,
+    requestId: 'req-1',
+    latencyMs: 1200,
+    statusCode: 200,
+  };
+
+  it('passes the integer micro-USD amount and converts to USD in SQL', async () => {
+    mockSqlFn.mockResolvedValueOnce([]);
+    await insertUsageLog(record);
+    const [strings, ...values] = mockSqlFn.mock.calls[0];
+    const sqlText = (strings as string[]).join('?');
+    // Reason: cost_usd must be derived from the same integer as the spend
+    // increment — division happens in exact NUMERIC, not in JS floats.
+    expect(sqlText).toContain('::numeric / 1000000');
+    expect(values).toContain(59_511);
+  });
+
+  it('propagates a DB error', async () => {
+    mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
+    await expect(insertUsageLog(record)).rejects.toThrow('connection lost');
   });
 });
