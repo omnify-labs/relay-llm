@@ -259,6 +259,22 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     expect(calculateCostMicroUsd('unknown-model-xyz', 1000, 500, 0, 0)).toBe(10_500n);
   });
 
+  it('keeps DEFAULT_PRICING float and micro rates in agreement', () => {
+    // Reason: DEFAULT_PRICING hand-writes the same rates in two encodings and is not
+    // covered by the served-model consistency sweep (it is not in PRICING). An unknown
+    // model is billed from it, so a drift between the two would mischarge silently.
+    // 1M tokens of each makes both encodings directly comparable.
+    const floatCost = calculateCost('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0);
+    const microCost = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0)) / 1e6;
+    expect(microCost).toBeCloseTo(floatCost, 6);
+    expect(microCost).toBeCloseTo(3.0 + 15.0, 6); // the documented $3/M + $15/M
+    // Cache rates: unknown models get no discount — cached reads bill at full input rate.
+    const cachedOnly = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 0, 1_000_000, 0)) / 1e6;
+    expect(cachedOnly).toBeCloseTo(3.0, 6);
+    const writeOnly = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 0, 0, 1_000_000)) / 1e6;
+    expect(writeOnly).toBeCloseTo(3.0, 6);
+  });
+
   it('floors the sub-micro-dollar remainder (user-favoring)', () => {
     // gemini-3.7-flash cache read is $0.075/M = 75,000 µ$/Mtok (rate pinned above).
     // 13 cached tokens → 13 × 75,000 = 975,000 < 1e6 → floors to 0 µ$;
@@ -271,10 +287,47 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     expect(calculateCostMicroUsd('gpt-5.4', 0, 0, 0, 0)).toBe(0n);
   });
 
-  it('stays exact for token counts where float products would exceed 2^53', () => {
-    // 3e8 input tokens × 3e6 µ rate = 9e14 (near float precision limits when summed);
-    // BigInt keeps it exact: 9e14 / 1e6 = 9e8 µ$ = $900.
-    expect(calculateCostMicroUsd('unknown-model-xyz', 300_000_000, 0, 0, 0)).toBe(900_000_000n);
+  it('stays exact where the float product loses integer precision (> 2^53)', () => {
+    // 4e9 output tokens × 15e6 µ rate = 6e16 — above 2^53 (~9.007e15), so the float
+    // product is no longer exactly representable; BigInt keeps it exact.
+    // 6e16 / 1e6 = 6e10 µ$ = $60,000.
+    const tokens = 4_000_000_000;
+    const rate = 15_000_000;
+    expect(Number.isSafeInteger(tokens * rate)).toBe(false); // pins the premise
+    expect(calculateCostMicroUsd('unknown-model-xyz', 0, tokens, 0, 0)).toBe(60_000_000_000n);
+  });
+
+  // --- Provider-garbage hardening (BigInt() throws on non-integers) ---
+
+  it.each([
+    ['fractional', 150.5, 10.25],
+    ['Infinity', Infinity, Infinity],
+    ['NaN', NaN, NaN],
+    ['negative', -1000, -500],
+  ])('does not throw on %s token counts, and never charges below zero', (_label, inTok, outTok) => {
+    // Reason: BigInt() throws a RangeError on non-integer/non-finite input. That throw
+    // would escape logUsage BEFORE its Promise.allSettled, skipping both the spend
+    // increment and the usage-log row — free, unaudited usage. Counts are sanitized
+    // instead (floor, clamped at 0), so the call is always safe.
+    let micro: bigint | undefined;
+    expect(() => {
+      micro = calculateCostMicroUsd('gpt-5.4', inTok, outTok, 0, 0);
+    }).not.toThrow();
+    expect(micro).toBeGreaterThanOrEqual(0n);
+  });
+
+  it('floors fractional token counts rather than rounding them up', () => {
+    // 1000.9 input floors to 1000 — identical to a clean 1000-token request.
+    expect(calculateCostMicroUsd('gpt-5.4', 1000.9, 500.9, 0, 0)).toBe(
+      calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0),
+    );
+  });
+
+  it('ignores garbage cache counts without going negative', () => {
+    // Negative cached/cache-creation counts must not inflate the non-cached term
+    // (a -1e9 cached count with an unclamped formula would bill ~$3,000 of input).
+    const garbage = calculateCostMicroUsd('gpt-5.4', 1000, 500, -1_000_000_000, -5.5);
+    expect(garbage).toBe(calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0));
   });
 
   it('agrees with the legacy float algorithm within 1 µ$ across a random sweep', () => {

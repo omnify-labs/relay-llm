@@ -117,17 +117,33 @@ describe('incrementUserSpend', () => {
     expect(mockSqlFn).toHaveBeenCalledTimes(1);
   });
 
-  it('truncates (rounds DOWN) the micro-USD amount in SQL, never half-up', async () => {
-    // Reason: the round-down-in-the-user's-favor policy lives in the SQL text —
-    // pin it so a refactor back to a bare `spend + ${amount}` (implicit half-up
-    // NUMERIC rounding) fails loudly.
+  it('adds the exact micro-USD amount and never rounds up', async () => {
+    // Reason: the never-round-up policy lives in the SQL text — pin it so a refactor
+    // back to a bare `spend + ${amount}` (implicit half-up NUMERIC rounding) fails
+    // loudly. 6 dp matches the micro-USD granularity of the charge, so the write is
+    // lossless; 4 dp would silently drop every sub-$0.0001 request to zero spend.
     mockSqlFn.mockResolvedValueOnce([]);
     await incrementUserSpend('u1', 59_511);
     const [strings, ...values] = mockSqlFn.mock.calls[0];
     const sqlText = (strings as string[]).join('?');
     expect(sqlText).toContain('trunc(');
-    expect(sqlText).toContain('/ 1000000, 4)');
+    expect(sqlText).toContain('/ 1000000, 6)');
     expect(values).toContain(59_511);
+  });
+
+  it('records sub-$0.0001 charges instead of dropping them to zero spend', async () => {
+    // Reason: a request costing 92 µ$ ($0.000092) is routine on cached reads of
+    // budget models. Truncating the increment at 4 dp would store $0 for it, so a
+    // stream of such requests would never advance spend and the fail-close budget
+    // gate would never trip. Pin the precision that makes the charge survive.
+    mockSqlFn.mockResolvedValueOnce([]);
+    await incrementUserSpend('u1', 92);
+    const [strings, ...values] = mockSqlFn.mock.calls[0];
+    const sqlText = (strings as string[]).join('?');
+    const decimals = Number(/\/ 1000000, (\d+)\)/.exec(sqlText)?.[1]);
+    expect(values).toContain(92);
+    // 92 µ$ = 0.000092 — needs at least 6 decimal places to survive truncation.
+    expect(decimals).toBeGreaterThanOrEqual(6);
   });
 
   it('handles zero amount', async () => {
@@ -164,8 +180,10 @@ describe('insertUsageLog', () => {
     const [strings, ...values] = mockSqlFn.mock.calls[0];
     const sqlText = (strings as string[]).join('?');
     // Reason: cost_usd must be derived from the same integer as the spend
-    // increment — division happens in exact NUMERIC, not in JS floats.
-    expect(sqlText).toContain('::numeric / 1000000');
+    // increment — division happens in exact NUMERIC, not in JS floats. The trailing
+    // comma anchors the divisor: a plain `toContain('/ 1000000')` also matches a
+    // 10x-overcharge typo like `/ 10000000`.
+    expect(sqlText).toMatch(/::numeric \/ 1000000\s*,/);
     expect(values).toContain(59_511);
   });
 

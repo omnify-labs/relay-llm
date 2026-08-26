@@ -59,13 +59,26 @@ ON CONFLICT (model) DO UPDATE SET
   updated_at = NOW();
 
 -- User budgets for managed users (set via Admin API)
+-- spend is NUMERIC(12,6): the ledger quantum MUST be finer than a single request's
+-- cost. At 4 decimal places, any charge below $0.0001 (routine for cached reads on
+-- budget models) rounds to zero and spend never advances, so the fail-close budget
+-- gate never trips. 6 dp matches the micro-USD granularity relay bills in.
 CREATE TABLE IF NOT EXISTS user_budgets (
   user_id TEXT PRIMARY KEY,
   budget NUMERIC(10,4) DEFAULT 0,
-  spend NUMERIC(10,4) DEFAULT 0,
+  spend NUMERIC(12,6) DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Micro-USD spend precision (2026-08-25)
+-- Widens spend so a request cheaper than $0.0001 still advances the ledger. Relay
+-- computes cost in integer micro-USD and floors ONCE there (in the user's favor);
+-- at 6 dp the SQL increment stores that value exactly, so user_budgets.spend and
+-- SUM(usage_logs.cost_usd) reconcile per request instead of drifting.
+-- Widening is backward compatible: existing values are preserved, readers parse
+-- more decimals, and old relay builds writing 4-dp amounts keep working.
+ALTER TABLE user_budgets ALTER COLUMN spend TYPE NUMERIC(12,6);
 
 -- Cache token tracking (2026-03-30)
 -- cached_input_tokens: tokens served from provider cache (billed at reduced rate)

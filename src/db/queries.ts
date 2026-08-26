@@ -78,13 +78,20 @@ export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
  */
 export async function incrementUserSpend(userId: string, costMicroUsd: number): Promise<void> {
   const sql = getDb();
-  // Reason: trunc(…, 4) rounds each charge DOWN to the ledger's $0.0001 quantum —
-  // an explicit user-favoring policy, replacing the implicit half-up rounding the
-  // NUMERIC(10,4) column would otherwise apply on store. The /1000000 division is
-  // exact (power of ten) in NUMERIC.
+  // Reason: add the EXACT micro-USD charge, never rounding up. The /1000000 division
+  // is exact in NUMERIC (power of ten) and trunc(…, 6) is a no-op on an integer
+  // micro-USD input — it is here so the "never round up" guarantee stays explicit and
+  // survives a future precision change.
+  //
+  // The ledger column must be finer-grained than a single charge: on NUMERIC(10,4)
+  // any request cheaper than $0.0001 (routine on cached reads of budget models) would
+  // round to zero and spend would never advance, so the fail-close budget gate could
+  // never trip. See the 2026-08-25 migration widening spend to NUMERIC(12,6), which
+  // makes this write lossless. Until that migration is applied the column silently
+  // rounds half-up on store — the pre-2026-08-25 behavior, safe but imprecise.
   await sql`
     UPDATE user_budgets
-    SET spend = spend + trunc(${costMicroUsd}::numeric / 1000000, 4), updated_at = NOW()
+    SET spend = spend + trunc(${costMicroUsd}::numeric / 1000000, 6), updated_at = NOW()
     WHERE user_id = ${userId}
   `;
 }
