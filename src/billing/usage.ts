@@ -5,7 +5,7 @@
  */
 
 import { insertUsageLog, incrementUserSpend } from '../db/queries.js';
-import { calculateCostMicroUsd } from './pricing.js';
+import { calculateCostMicroUsd, safeTokenCount } from './pricing.js';
 import type { ProviderName } from '../proxy/providers.js';
 
 export interface UsageRecord {
@@ -30,19 +30,23 @@ export interface UsageRecord {
  * insertUsageLog fails, retrying both would double-charge the user.
  */
 export async function logUsage(record: UsageRecord): Promise<void> {
+  // Reason: sanitize the provider counts ONCE, here, and use the sanitized values for
+  // BOTH the cost math and the audit row. usage_logs' token columns are INTEGER, so a
+  // fractional/non-finite/string count would otherwise let the spend increment succeed
+  // (it uses the cost, which sanitizes internally) while the INSERT fails — charging
+  // the user but losing the audit row.
+  const inputTokens = safeTokenCount(record.inputTokens);
+  const outputTokens = safeTokenCount(record.outputTokens);
+  const cachedInputTokens = safeTokenCount(record.cachedInputTokens);
+  const cacheCreationTokens = safeTokenCount(record.cacheCreationTokens);
+
   // Reason: billing math stays in integer micro-USD end-to-end; the only float
   // rendering of this value is the log line below. Number() is safe — µ$ amounts
   // are far below 2^53.
   const costMicroUsd = Number(
-    calculateCostMicroUsd(
-      record.model,
-      record.inputTokens,
-      record.outputTokens,
-      record.cachedInputTokens,
-      record.cacheCreationTokens,
-    ),
+    calculateCostMicroUsd(record.model, inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens),
   );
-  const totalTokens = record.inputTokens + record.outputTokens;
+  const totalTokens = inputTokens + outputTokens;
 
   // Run both independently so a failure in one doesn't block or duplicate the other
   const [spendResult, logResult] = await Promise.allSettled([
@@ -51,6 +55,10 @@ export async function logUsage(record: UsageRecord): Promise<void> {
       () =>
         insertUsageLog({
           ...record,
+          inputTokens,
+          outputTokens,
+          cachedInputTokens,
+          cacheCreationTokens,
           totalTokens,
           costMicroUsd,
         }),
@@ -61,7 +69,7 @@ export async function logUsage(record: UsageRecord): Promise<void> {
   if (spendResult.status === 'fulfilled' && logResult.status === 'fulfilled') {
     console.log(
       `[Relay] Usage logged: user=${record.userId.slice(0, 8)} provider=${record.provider} model=${record.model} ` +
-        `in=${record.inputTokens} cached=${record.cachedInputTokens} out=${record.outputTokens} cost=$${(costMicroUsd / 1e6).toFixed(6)} latency=${record.latencyMs}ms`,
+        `in=${inputTokens} cached=${cachedInputTokens} out=${outputTokens} cost=$${(costMicroUsd / 1e6).toFixed(6)} latency=${record.latencyMs}ms`,
     );
   } else {
     if (spendResult.status === 'rejected') {

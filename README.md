@@ -67,8 +67,11 @@ The trade-off is explicit: you send requests in each provider's **native format*
 - Streams responses byte-for-byte back to the client
 - Extracts token counts asynchronously (never blocks the response)
 - Prices each request in exact integer micro-USD (BigInt multiply-adds, one floor
-  division), and truncates each ledger increment down to $0.0001 -- rounding always
-  favors the user, never the house
+  division at the µ$ digit), then adds that exact amount to the ledger. Rounding
+  happens once, at the µ$ floor, in the user's favor -- never the house. (On the
+  legacy NUMERIC(10,4) `spend` column, before the widening migration, the stored sum
+  is rounded half-up to $0.0001 per write -- still accumulating, mildly house-favoring
+  by <$0.0001/request until the migration lands.)
 - Logs usage to Postgres
 
 **What RelayLLM does NOT do:**
@@ -262,7 +265,7 @@ src/
     budget.ts           # Per-run budget admission (gate once at run start)
     run-admission.ts    # In-memory admitted-run store (TTL + per-user cap)
     usage.ts            # Async token usage logging
-    pricing.ts          # Model pricing table
+    pricing.ts          # calculateCostMicroUsd (integer µ$ billing path) + display wrapper
   db/
     client.ts           # Postgres connection
     queries.ts          # Usage + budget queries

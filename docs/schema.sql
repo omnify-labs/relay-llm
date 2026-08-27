@@ -80,6 +80,33 @@ CREATE TABLE IF NOT EXISTS user_budgets (
 -- more decimals, and old relay builds writing 4-dp amounts keep working.
 ALTER TABLE user_budgets ALTER COLUMN spend TYPE NUMERIC(12,6);
 
+-- Harden the billing ledger against PostgREST exposure (2026-08-27)
+-- On the shared Supabase deployment, PostgREST exposes the `public` schema. Today
+-- anon/authenticated cannot reach these tables (no USAGE granted on schema public,
+-- verified: GET returns 403), but user_budgets still carries over-broad table grants
+-- (INSERT/UPDATE/DELETE to `authenticated`) with NO RLS backstop. A single future
+-- `GRANT USAGE ON SCHEMA public TO authenticated` — a common Supabase default — would
+-- then let any signed-in user rewrite their own budget/spend.
+--
+-- Enabling RLS with no permissive policy is safe here: relay connects as the table
+-- owner `postgres` (BYPASSRLS) and the dassi edge functions use `service_role`
+-- (BYPASSRLS); only anon/authenticated are affected, which is the intent. The REVOKEs
+-- are guarded so this block is a no-op on a standalone relay Postgres that has no
+-- Supabase roles.
+ALTER TABLE user_budgets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_logs   ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON user_budgets FROM authenticated;
+    REVOKE ALL ON usage_logs   FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON user_budgets FROM anon;
+    REVOKE ALL ON usage_logs   FROM anon;
+  END IF;
+END $$;
+
 -- Cache token tracking (2026-03-30)
 -- cached_input_tokens: tokens served from provider cache (billed at reduced rate)
 -- cache_creation_tokens: tokens written to cache (Anthropic: billed at 1.25x)

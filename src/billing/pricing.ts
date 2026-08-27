@@ -15,18 +15,22 @@ const DEFAULT_PRICING: ModelPricing = {
 /**
  * Coerce a provider-reported token count to a safe non-negative integer.
  *
- * @param n - Raw count from the provider's usage block (may be fractional, negative,
- *   non-finite, or absent when a provider misbehaves).
- * @returns A non-negative integer safe to pass to BigInt().
+ * @param n - Raw count from the provider's usage block. Typed `number`, but provider
+ *   JSON is untrusted at runtime: it may be fractional, negative, non-finite, a
+ *   numeric string, or absent.
+ * @returns A non-negative integer safe for BigInt() and for the INTEGER columns in
+ *   usage_logs.
  */
-function safeTokenCount(n: number): number {
-  // Reason: BigInt() THROWS on non-integer and non-finite input. A throw here
-  // escapes logUsage before its Promise.allSettled, skipping BOTH the spend
-  // increment and the usage-log row — the request would be served free and
-  // unaudited. Floor (never ceil) keeps the user-favoring rounding policy, and
-  // clamping at 0 keeps the running total non-negative so the final division
-  // can only ever truncate downward.
-  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+export function safeTokenCount(n: number): number {
+  // Reason: BigInt() THROWS on non-integer and non-finite input, and usage_logs'
+  // token columns are INTEGER. An unsanitized value escapes logUsage before its
+  // Promise.allSettled, skipping BOTH the spend increment and the audit row — the
+  // request is served free and unlogged. Number() coerces numeric strings (which the
+  // legacy float path billed via implicit arithmetic coercion) so we don't regress
+  // them to $0; floor (never ceil) keeps the user-favoring policy; clamping at 0
+  // keeps every term non-negative so the final BigInt division truncates downward.
+  const v = Number(n);
+  return Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
 }
 
 /**

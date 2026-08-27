@@ -323,6 +323,15 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     );
   });
 
+  it('bills numeric-string counts like the legacy float path (not $0)', () => {
+    // Reason: a provider reporting counts as JSON strings ("1000") was billed by main
+    // via arithmetic coercion. safeTokenCount uses Number(), so we do not regress it to
+    // $0. Typed as number, so cast at the call boundary to model untrusted runtime JSON.
+    const asString = calculateCostMicroUsd('gpt-5.4', '1000' as unknown as number, '500' as unknown as number, 0, 0);
+    expect(asString).toBe(calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0));
+    expect(asString).toBeGreaterThan(0n);
+  });
+
   it('ignores garbage cache counts without going negative', () => {
     // Negative cached/cache-creation counts must not inflate the non-cached term
     // (a -1e9 cached count with an unclamped formula would bill ~$3,000 of input).
