@@ -24,7 +24,7 @@
     "@mariozechner/pi-ai": "^0.56.3",
     "typescript": "^5.7.0",
     "tsup": "^8.0.0",
-    "vitest": "^3.0.0"
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=20"
