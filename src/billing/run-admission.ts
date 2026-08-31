@@ -163,8 +163,8 @@ export function admitRun(
  *
  * Idempotent-safe against a missing run: a charge for a run that was never admitted (no
  * runId header) or already dropped/expired is a no-op. Called from the usage-logging
- * path AFTER the spend increment, so a run's own charges shrink its headroom in step
- * with the ledger.
+ * path BEFORE the ledger writes, and unconditionally — the request was served, so the
+ * in-memory bound shrinks even if `incrementUserSpend` later fails.
  *
  * @param userId - The authenticated user.
  * @param runId - Run id from the X-Dassi-Run-Id header.
@@ -227,4 +227,19 @@ export function admissionCountForTests(): number {
   let total = 0;
   for (const runs of admitted.values()) total += runs.size;
   return total;
+}
+
+/**
+ * Test-only: a run's remaining headroom in µ$, or undefined if not admitted.
+ *
+ * Exposes the budget-aware bound so tests can assert the exact headroom captured at
+ * admission (the µ$ conversion in budget.ts) and the negative-headroom clamp — neither
+ * is observable through isRunAdmitted, which reads only expiresAt.
+ *
+ * @param userId - The authenticated user.
+ * @param runId - Run id.
+ * @returns remainingMicroUsd, or undefined when the run is not tracked.
+ */
+export function runHeadroomForTests(userId: string, runId: string): number | undefined {
+  return admitted.get(userId)?.get(runId)?.remainingMicroUsd;
 }

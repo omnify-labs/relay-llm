@@ -15,7 +15,7 @@ vi.mock('../db/queries.js', () => ({
 import { budgetMiddleware } from '../billing/budget.js';
 import {
   admitRun,
-  isRunAdmitted,
+  runHeadroomForTests,
   __resetAdmissionsForTests,
 } from '../billing/run-admission.js';
 
@@ -116,14 +116,15 @@ describe('budgetMiddleware — per-run admission', () => {
     expect(res.status).toBe(200);
   });
 
-  it('admits a new run with the (budget - spend) headroom in micro-USD', async () => {
-    // Reason: the gate must hand admitRun a budget-aware bound, not just open a window.
-    // budget 25 - spend 10 = $15 headroom = 15,000,000 µ$; the run stays admitted while
-    // its charges stay under that.
+  it('admits a new run with exactly the (budget - spend) headroom in micro-USD', async () => {
+    // Reason: the one line this PR adds to budget.ts is a unit conversion — its whole
+    // risk is a µ$ error. Assert the EXACT headroom, not just isRunAdmitted (which reads
+    // only expiresAt): dropping `* 1_000_000`, swapping operands, or hardcoding 0 must
+    // all fail here. budget 25 - spend 10 = $15 = 15,000,000 µ$.
     mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10 });
     const app = buildTestApp();
     await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-hr' } });
-    expect(isRunAdmitted('user-42', 'run-hr')).toBe(true);
+    expect(runHeadroomForTests('user-42', 'run-hr')).toBe(15_000_000);
   });
 
   it('bypasses the budget query for an already-admitted in-flight run', async () => {

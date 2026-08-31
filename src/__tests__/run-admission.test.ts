@@ -3,6 +3,7 @@ import {
   isRunAdmitted,
   admitRun,
   chargeRun,
+  runHeadroomForTests,
   __resetAdmissionsForTests,
   admissionCountForTests,
   MAX_ADMITTED_RUNS_PER_USER,
@@ -215,11 +216,12 @@ describe('run-admission — budget-aware headroom (chargeRun)', () => {
     expect(admissionCountForTests()).toBe(0);
   });
 
-  it('clamps a negative admission headroom to zero (drops on first charge)', () => {
-    // A run admitted with no headroom (e.g. rounding a spend already at budget) must not
-    // become an unlimited window; the next charge drops it.
+  it('clamps a negative admission headroom to zero', () => {
+    // Reason: a run admitted with negative headroom (e.g. rounding a spend already past
+    // budget) must not carry a negative counter. Assert the clamp DIRECTLY via the
+    // headroom accessor — dropping Math.max(0, …) is invisible to isRunAdmitted, and a
+    // -5 counter still drops on first charge, so a behavioral test can't see the clamp.
     admitRun('u1', 'run-a', -5, 0);
-    chargeRun('u1', 'run-a', 1, 0);
-    expect(isRunAdmitted('u1', 'run-a', 0)).toBe(false);
+    expect(runHeadroomForTests('u1', 'run-a')).toBe(0);
   });
 });
