@@ -20,6 +20,16 @@ export interface ModelPricing {
   inputPerMillionAbove200k?: number;
   outputPerMillionAbove200k?: number;
   cachedInputPerMillionAbove200k?: number;
+  // Integer micro-USD (1e-6 $) per million tokens — the billing-path representation.
+  // Reason: the ledger math must stay in exact integers; the float fields above are
+  // display/test conveniences only and MUST NOT feed spend accounting.
+  inputMicro: bigint;
+  outputMicro: bigint;
+  cachedInputMicro: bigint;
+  cacheCreationMicro: bigint;
+  inputMicroAbove200k?: bigint;
+  outputMicroAbove200k?: bigint;
+  cachedInputMicroAbove200k?: bigint;
 }
 
 /** Only the LiteLLM fields relay consumes; the file has many more we ignore. */
@@ -82,6 +92,18 @@ function toMillion(perToken: number | undefined): number {
 }
 
 /**
+ * Convert a LiteLLM per-token USD price to integer micro-USD per million tokens.
+ * @param perToken - Per-token USD price from the LiteLLM table (or undefined).
+ * @returns Integer µ$/Mtok as bigint (0n when the price is absent).
+ */
+function toMicro(perToken: number | undefined): bigint {
+  // Reason: one exact translation of the published price at table-build time
+  // (µ$/Mtok = $/tok × 1e12). Real prices have ≤12 decimal places per token, so
+  // round() only strips binary-float noise, never real price digits.
+  return perToken != null ? BigInt(Math.round(perToken * 1e12)) : 0n;
+}
+
+/**
  * Convert one LiteLLM entry to relay's per-million ModelPricing.
  * @param entry - Raw LiteLLM pricing entry for a single model.
  * @returns ModelPricing with all rates converted from per-token to per-million.
@@ -92,15 +114,22 @@ export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
     outputPerMillion: toMillion(entry.output_cost_per_token),
     cachedInputPerMillion: toMillion(entry.cache_read_input_token_cost),
     cacheCreationPerMillion: toMillion(entry.cache_creation_input_token_cost),
+    inputMicro: toMicro(entry.input_cost_per_token),
+    outputMicro: toMicro(entry.output_cost_per_token),
+    cachedInputMicro: toMicro(entry.cache_read_input_token_cost),
+    cacheCreationMicro: toMicro(entry.cache_creation_input_token_cost),
   };
   if (entry.input_cost_per_token_above_200k_tokens != null) {
     pricing.inputPerMillionAbove200k = toMillion(entry.input_cost_per_token_above_200k_tokens);
+    pricing.inputMicroAbove200k = toMicro(entry.input_cost_per_token_above_200k_tokens);
   }
   if (entry.output_cost_per_token_above_200k_tokens != null) {
     pricing.outputPerMillionAbove200k = toMillion(entry.output_cost_per_token_above_200k_tokens);
+    pricing.outputMicroAbove200k = toMicro(entry.output_cost_per_token_above_200k_tokens);
   }
   if (entry.cache_read_input_token_cost_above_200k_tokens != null) {
     pricing.cachedInputPerMillionAbove200k = toMillion(entry.cache_read_input_token_cost_above_200k_tokens);
+    pricing.cachedInputMicroAbove200k = toMicro(entry.cache_read_input_token_cost_above_200k_tokens);
   }
   return pricing;
 }
@@ -126,6 +155,34 @@ export function missingServedModels(): string[] {
   });
 }
 
+/**
+ * Deterministic fingerprint of just the SERVED models' normalized pricing.
+ *
+ * Two raw tables with the same served-model prices produce identical strings, so any
+ * difference means a price relay actually bills for has changed. Used by
+ * scripts/litellm-prices-check.ts to keep the vendored-table sync low-noise.
+ *
+ * @param raw - A parsed upstream/vendored LiteLLM price map.
+ * @returns Stable JSON string of `{ [servedModel]: ModelPricing | null }`.
+ */
+export function servedFingerprint(raw: Record<string, Record<string, unknown>>): string {
+  const out: Record<string, unknown> = {};
+  for (const model of SERVED_MODELS) {
+    const key = ALIASES[model] ?? model;
+    const entry = raw[key];
+    out[model] =
+      entry && entry['input_cost_per_token'] != null
+        ? normalizeEntry(entry as LiteLLMEntry)
+        : null;
+  }
+  // Reason: ModelPricing carries bigint micro-USD rates and JSON.stringify THROWS on
+  // bigint. Render them as decimal strings so the fingerprint stays serializable and
+  // still covers the integer rates the ledger bills from.
+  return JSON.stringify(out, (_key, value) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
+}
+
 /** Build the served-model pricing table, keyed by relay model id. */
 function buildPricingTable(): Record<string, ModelPricing> {
   const table: Record<string, ModelPricing> = {};
@@ -138,7 +195,8 @@ function buildPricingTable(): Record<string, ModelPricing> {
   const missing = missingServedModels();
   if (missing.length > 0) {
     // Reason: a missing served model falls to DEFAULT_PRICING (conservative) in
-    // calculateCost — log loud so coverage gaps surface instead of silently mischarging.
+    // calculateCostMicroUsd — log loud so coverage gaps surface instead of
+    // silently mischarging.
     console.error(
       `[Relay] LiteLLM pricing MISSING for served models: ${missing.join(', ')} — falling back to DEFAULT_PRICING.`,
     );

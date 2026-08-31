@@ -13,11 +13,18 @@ vi.mock('../db/queries.js', () => ({
   incrementUserSpend: (...args: unknown[]) => mockIncrementUserSpend(...args),
 }));
 
-vi.mock('../billing/pricing.js', () => ({
-  calculateCost: vi.fn().mockReturnValue(0.005),
-}));
+// Reason: keep the REAL safeTokenCount (logUsage now sanitizes counts through it) but
+// stub the cost so tests assert wiring, not pricing. Spreading importActual preserves
+// every other export.
+vi.mock('../billing/pricing.js', async (importActual) => {
+  const actual = await importActual<typeof import('../billing/pricing.js')>();
+  return { ...actual, calculateCostMicroUsd: vi.fn().mockReturnValue(5000n) }; // 5000 µ$ = $0.005
+});
 
 import { logUsage, type UsageRecord } from '../billing/usage.js';
+import { calculateCostMicroUsd } from '../billing/pricing.js';
+
+const mockCalc = vi.mocked(calculateCostMicroUsd);
 
 const baseRecord: UsageRecord = {
   userId: 'user-abc-123',
@@ -35,6 +42,8 @@ const baseRecord: UsageRecord = {
 beforeEach(() => {
   mockInsertUsageLog.mockReset();
   mockIncrementUserSpend.mockReset();
+  mockCalc.mockClear();
+  mockCalc.mockReturnValue(5000n);
   // Default: both succeed
   mockInsertUsageLog.mockResolvedValue(undefined);
   mockIncrementUserSpend.mockResolvedValue(undefined);
@@ -44,16 +53,59 @@ describe('logUsage', () => {
   it('calls insertUsageLog and incrementUserSpend on success', async () => {
     await logUsage(baseRecord);
 
-    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-abc-123', 0.005);
+    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-abc-123', 5000);
     expect(mockInsertUsageLog).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'user-abc-123',
         provider: 'openai',
         model: 'gpt-4o',
         totalTokens: 150,
-        costUsd: 0.005,
+        costMicroUsd: 5000,
       }),
     );
+  });
+
+  it('passes cost args in the exact (model, in, out, cached, cacheCreation) order', async () => {
+    // Reason: logUsage rewrote this 5-arg call site. A swap (e.g. cached<->cacheCreation,
+    // or in<->out) would mis-price silently — a constant-return mock can't catch it, so
+    // pin the call arguments positionally.
+    await logUsage({
+      ...baseRecord,
+      inputTokens: 111,
+      outputTokens: 22,
+      cachedInputTokens: 33,
+      cacheCreationTokens: 4,
+    });
+    expect(mockCalc).toHaveBeenCalledWith('gpt-4o', 111, 22, 33, 4);
+  });
+
+  it('sanitizes garbage provider counts before both the charge and the audit row', async () => {
+    // Reason: usage_logs' token columns are INTEGER. A fractional/non-finite count must
+    // not let the spend increment succeed while the INSERT dies (charge kept, audit row
+    // lost). Counts are floored/clamped once in logUsage, so the row carries clean ints
+    // and the cost is computed from the same clean ints.
+    await logUsage({
+      ...baseRecord,
+      inputTokens: 150.9,
+      outputTokens: Infinity,
+      cachedInputTokens: -5,
+      cacheCreationTokens: NaN,
+    });
+    // cost computed from sanitized ints: 150 in, 0 out, 0 cached, 0 cacheCreation
+    expect(mockCalc).toHaveBeenCalledWith('gpt-4o', 150, 0, 0, 0);
+    // audit row carries only integers, total = 150 + 0
+    expect(mockInsertUsageLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        inputTokens: 150,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        cacheCreationTokens: 0,
+        totalTokens: 150,
+      }),
+    );
+    // and the request is still both charged and logged (no throw skipped either leg)
+    expect(mockIncrementUserSpend).toHaveBeenCalledTimes(1);
+    expect(mockInsertUsageLog).toHaveBeenCalledTimes(1);
   });
 
   it('retries insertUsageLog independently without duplicating incrementUserSpend', async () => {
@@ -128,6 +180,27 @@ describe('logUsage', () => {
     );
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('Failed to insert usage log'),
+    );
+
+    consoleSpy.mockRestore();
+  });
+
+  it('normalizes non-Error rejections into readable log messages', async () => {
+    // Reason: covers retryAsync's non-Error branch — a driver can reject with a
+    // bare string/object; retryAsync wraps it in `new Error(String(...))` so the
+    // log path never crashes on `.message` and still carries the reason text.
+    mockIncrementUserSpend.mockRejectedValue('string failure');
+    mockInsertUsageLog.mockRejectedValue({ code: 'ECONNRESET' });
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await logUsage(baseRecord);
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to increment spend after 3 attempts: string failure'),
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to insert usage log after 3 attempts: [object Object]'),
     );
 
     consoleSpy.mockRestore();

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { calculateCost } from '../billing/pricing.js';
-import { PRICING } from '../billing/litellm-pricing.js';
+import { calculateCost, calculateCostMicroUsd } from '../billing/pricing.js';
+import { PRICING, type ModelPricing } from '../billing/litellm-pricing.js';
 
 // helper: expected simple in+out cost from the live table
 const io = (m: string, inTok: number, outTok: number) =>
@@ -10,17 +10,17 @@ describe('calculateCost', () => {
   // --- Existing tests (updated signature) ---
 
   it('calculates cost for known OpenAI model', () => {
-    expect(calculateCost('gpt-5.4', 1000, 500, 0, 0)).toBeCloseTo(io('gpt-5.4', 1000, 500), 6);
+    expect(calculateCost('gpt-5.4', 1000, 500, 0, 0)).toBeCloseTo(io('gpt-5.4', 1000, 500), 5);
   });
 
   it('calculates cost for known Anthropic model', () => {
     expect(calculateCost('claude-sonnet-4-5', 2000, 1000, 0, 0))
-      .toBeCloseTo(io('claude-sonnet-4-5', 2000, 1000), 6);
+      .toBeCloseTo(io('claude-sonnet-4-5', 2000, 1000), 5);
   });
 
   it('calculates cost for known Google model', () => {
     expect(calculateCost('gemini-2.0-flash', 10000, 5000, 0, 0))
-      .toBeCloseTo(io('gemini-2.0-flash', 10000, 5000), 6);
+      .toBeCloseTo(io('gemini-2.0-flash', 10000, 5000), 5);
   });
 
   it('gemini-3.5-flash resolves to a real (non-default) price', () => {
@@ -99,7 +99,7 @@ describe('calculateCost', () => {
       (90_000 / 1e6) * p.cachedInputPerMillion +
       (1_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('gemini-3.5-flash-lite', 100_000, 1_000, 90_000, 0);
-    expect(cost).toBeCloseTo(expected, 6);
+    expect(cost).toBeCloseTo(expected, 5);
     // Reason: failure case — an unserved id falls to DEFAULT_PRICING, which
     // charges cached reads at the full $3/M. The budget tier must be strictly
     // cheaper on this shape or the entry is not doing its job.
@@ -115,7 +115,7 @@ describe('calculateCost', () => {
       (10_000 / 1e6) * p.cacheCreationPerMillion +
       (5_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('claude-opus-5', 50_000, 5_000, 30_000, 10_000);
-    expect(cost).toBeCloseTo(expected, 6);
+    expect(cost).toBeCloseTo(expected, 5);
   });
 
   it('applies gemini-3.5-flash cached input discount (90% off)', () => {
@@ -238,7 +238,7 @@ describe('calculateCost', () => {
   it('handles all cache tokens being zero (backward compat)', () => {
     // 1000 input + 500 output, no cache — same as the simple io() helper
     const withZeros = calculateCost('gpt-5.4', 1000, 500, 0, 0);
-    expect(withZeros).toBeCloseTo(io('gpt-5.4', 1000, 500), 6);
+    expect(withZeros).toBeCloseTo(io('gpt-5.4', 1000, 500), 5);
   });
 
   it('guards against cachedInputTokens exceeding total (provider bug)', () => {
@@ -249,5 +249,137 @@ describe('calculateCost', () => {
     expect(cost).toBeGreaterThanOrEqual(0);
     const normalCost = calculateCost('gpt-4.1', 1000, 500, 0, 0);
     expect(cost).toBeLessThanOrEqual(normalCost);
+  });
+});
+
+describe('calculateCostMicroUsd (integer billing path)', () => {
+  it('returns exact integer micro-USD against DEFAULT_PRICING (stable in-repo rates)', () => {
+    // Unknown model → DEFAULT_PRICING $3/M in, $15/M out (pinned in pricing.ts):
+    // 1000 × 3,000,000µ + 500 × 15,000,000µ = 10.5e9 → /1e6 = 10,500 µ$ = $0.0105
+    expect(calculateCostMicroUsd('unknown-model-xyz', 1000, 500, 0, 0)).toBe(10_500n);
+  });
+
+  it('keeps DEFAULT_PRICING float and micro rates in agreement', () => {
+    // Reason: DEFAULT_PRICING hand-writes the same rates in two encodings and is not
+    // covered by the served-model consistency sweep (it is not in PRICING). An unknown
+    // model is billed from it, so a drift between the two would mischarge silently.
+    // 1M tokens of each makes both encodings directly comparable.
+    const floatCost = calculateCost('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0);
+    const microCost = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0)) / 1e6;
+    expect(microCost).toBeCloseTo(floatCost, 6);
+    expect(microCost).toBeCloseTo(3.0 + 15.0, 6); // the documented $3/M + $15/M
+    // Cache rates: unknown models get no discount — cached reads bill at full input rate.
+    const cachedOnly = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 0, 1_000_000, 0)) / 1e6;
+    expect(cachedOnly).toBeCloseTo(3.0, 6);
+    const writeOnly = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 0, 0, 1_000_000)) / 1e6;
+    expect(writeOnly).toBeCloseTo(3.0, 6);
+  });
+
+  it('floors the sub-micro-dollar remainder (user-favoring)', () => {
+    // gemini-3.7-flash cache read is $0.075/M = 75,000 µ$/Mtok (rate pinned above).
+    // 13 cached tokens → 13 × 75,000 = 975,000 < 1e6 → floors to 0 µ$;
+    // 14 cached tokens → 1,050,000 → floors to 1 µ$ (remainder 50,000 discarded).
+    expect(calculateCostMicroUsd('gemini-3.7-flash', 13, 0, 13, 0)).toBe(0n);
+    expect(calculateCostMicroUsd('gemini-3.7-flash', 14, 0, 14, 0)).toBe(1n);
+  });
+
+  it('returns 0n for zero tokens', () => {
+    expect(calculateCostMicroUsd('gpt-5.4', 0, 0, 0, 0)).toBe(0n);
+  });
+
+  it('stays exact where the float product loses integer precision (> 2^53)', () => {
+    // 4e9 output tokens × 15e6 µ rate = 6e16 — above 2^53 (~9.007e15), so the float
+    // product is no longer exactly representable; BigInt keeps it exact.
+    // 6e16 / 1e6 = 6e10 µ$ = $60,000.
+    const tokens = 4_000_000_000;
+    const rate = 15_000_000;
+    expect(Number.isSafeInteger(tokens * rate)).toBe(false); // pins the premise
+    expect(calculateCostMicroUsd('unknown-model-xyz', 0, tokens, 0, 0)).toBe(60_000_000_000n);
+  });
+
+  // --- Provider-garbage hardening (BigInt() throws on non-integers) ---
+
+  it.each([
+    ['fractional', 150.5, 10.25],
+    ['Infinity', Infinity, Infinity],
+    ['NaN', NaN, NaN],
+    ['negative', -1000, -500],
+  ])('does not throw on %s token counts, and never charges below zero', (_label, inTok, outTok) => {
+    // Reason: BigInt() throws a RangeError on non-integer/non-finite input. That throw
+    // would escape logUsage BEFORE its Promise.allSettled, skipping both the spend
+    // increment and the usage-log row — free, unaudited usage. Counts are sanitized
+    // instead (floor, clamped at 0), so the call is always safe.
+    let micro: bigint | undefined;
+    expect(() => {
+      micro = calculateCostMicroUsd('gpt-5.4', inTok, outTok, 0, 0);
+    }).not.toThrow();
+    expect(micro).toBeGreaterThanOrEqual(0n);
+  });
+
+  it('floors fractional token counts rather than rounding them up', () => {
+    // 1000.9 input floors to 1000 — identical to a clean 1000-token request.
+    expect(calculateCostMicroUsd('gpt-5.4', 1000.9, 500.9, 0, 0)).toBe(
+      calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0),
+    );
+  });
+
+  it('bills numeric-string counts like the legacy float path (not $0)', () => {
+    // Reason: a provider reporting counts as JSON strings ("1000") was billed by main
+    // via arithmetic coercion. safeTokenCount uses Number(), so we do not regress it to
+    // $0. Typed as number, so cast at the call boundary to model untrusted runtime JSON.
+    const asString = calculateCostMicroUsd('gpt-5.4', '1000' as unknown as number, '500' as unknown as number, 0, 0);
+    expect(asString).toBe(calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0));
+    expect(asString).toBeGreaterThan(0n);
+  });
+
+  it('ignores garbage cache counts without going negative', () => {
+    // Negative cached/cache-creation counts must not inflate the non-cached term
+    // (a -1e9 cached count with an unclamped formula would bill ~$3,000 of input).
+    const garbage = calculateCostMicroUsd('gpt-5.4', 1000, 500, -1_000_000_000, -5.5);
+    expect(garbage).toBe(calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0));
+  });
+
+  it('agrees with the legacy float algorithm within 1 µ$ across a random sweep', () => {
+    // Reason: differential test — the integer rewrite must be a refinement of the
+    // old float math (identical up to the intentional floor), never a re-pricing.
+    const legacyFloatCost = (
+      p: ModelPricing,
+      inputTokens: number,
+      outputTokens: number,
+      cachedInputTokens: number,
+      cacheCreationTokens: number,
+    ): number => {
+      const useHighTier = inputTokens > 200_000;
+      const inputRate = (useHighTier && p.inputPerMillionAbove200k != null)
+        ? p.inputPerMillionAbove200k : p.inputPerMillion;
+      const outputRate = (useHighTier && p.outputPerMillionAbove200k != null)
+        ? p.outputPerMillionAbove200k : p.outputPerMillion;
+      const cachedReadRate = (useHighTier && p.cachedInputPerMillionAbove200k != null)
+        ? p.cachedInputPerMillionAbove200k : p.cachedInputPerMillion;
+      const safeCachedInput = Math.min(cachedInputTokens, inputTokens);
+      const safeCacheCreation = Math.min(cacheCreationTokens, inputTokens - safeCachedInput);
+      const nonCachedInput = Math.max(0, inputTokens - safeCachedInput - safeCacheCreation);
+      return (
+        (nonCachedInput / 1e6) * inputRate +
+        (safeCachedInput / 1e6) * cachedReadRate +
+        (safeCacheCreation / 1e6) * p.cacheCreationPerMillion +
+        (outputTokens / 1e6) * outputRate
+      );
+    };
+
+    const models = Object.keys(PRICING);
+    for (let i = 0; i < 100_000; i++) {
+      const model = models[i % models.length];
+      const inputTokens = Math.floor(Math.random() * 2_000_000);
+      const outputTokens = Math.floor(Math.random() * 100_000);
+      const cachedInputTokens = Math.floor(Math.random() * inputTokens * 1.1); // sometimes exceeds input (provider-bug path)
+      const cacheCreationTokens = Math.floor(Math.random() * 50_000);
+      const micro = calculateCostMicroUsd(model, inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens);
+      const legacy = legacyFloatCost(PRICING[model], inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens);
+      const diff = Math.abs(legacy - Number(micro) / 1e6);
+      // 1 µ$ for the intentional floor + 1e-9 slack for the legacy algorithm's own float error
+      expect(diff, `model=${model} in=${inputTokens} out=${outputTokens} cached=${cachedInputTokens} cc=${cacheCreationTokens}`)
+        .toBeLessThanOrEqual(1e-6 + 1e-9);
+    }
   });
 });

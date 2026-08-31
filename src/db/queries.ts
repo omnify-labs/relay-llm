@@ -18,7 +18,8 @@ export interface UsageLogInsert {
   totalTokens: number;
   cachedInputTokens: number;
   cacheCreationTokens: number;
-  costUsd: number;
+  /** Request cost in integer micro-USD (1e-6 $) — converted to USD in SQL. */
+  costMicroUsd: number;
   requestId: string;
   latencyMs: number;
   statusCode: number;
@@ -63,7 +64,7 @@ export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
       ${record.userId}, ${record.provider}, ${record.model},
       ${record.inputTokens}, ${record.outputTokens}, ${record.totalTokens},
       ${record.cachedInputTokens}, ${record.cacheCreationTokens},
-      ${record.costUsd}, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
+      ${record.costMicroUsd}::numeric / 1000000, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
     )
   `;
 }
@@ -73,13 +74,27 @@ export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
  * Uses atomic SQL increment to avoid race conditions.
  *
  * @param userId - User ID from JWT sub claim
- * @param amount - Amount in USD to add to spend
+ * @param costMicroUsd - Amount in integer micro-USD (1e-6 $) to add to spend
  */
-export async function incrementUserSpend(userId: string, amount: number): Promise<void> {
+export async function incrementUserSpend(userId: string, costMicroUsd: number): Promise<void> {
   const sql = getDb();
+  // Reason: add the EXACT micro-USD charge, never rounding up. The /1000000 division
+  // is exact in NUMERIC (power of ten); trunc(…, 6) is a no-op on an integer µ$ input
+  // (kept so the "never round up" guarantee is explicit and survives a precision
+  // change). Once the 2026-08-25 migration widening spend to NUMERIC(12,6) is applied,
+  // this write is lossless and rounding happens exactly once — the user-favoring floor
+  // in calculateCostMicroUsd.
+  //
+  // Before that migration, on the legacy NUMERIC(10,4) column, `spend + 0.000xxx`
+  // still ACCUMULATES (the sum is stored half-up to 4dp, so sub-quantum charges are
+  // not lost — verified: 1000×92µ$ → $0.1000, gate trips normally). The only pre-
+  // migration imperfection is that per-store half-up rounding is mildly house-favoring
+  // (≤$0.0001/request), not the user-favoring floor. Note the ORIGINAL trunc(…, 4)
+  // form DID lose sub-$0.0001 charges to $0 — that leak is what widening + trunc-6
+  // fixes; do not narrow either.
   await sql`
     UPDATE user_budgets
-    SET spend = spend + ${amount}, updated_at = NOW()
+    SET spend = spend + trunc(${costMicroUsd}::numeric / 1000000, 6), updated_at = NOW()
     WHERE user_id = ${userId}
   `;
 }
