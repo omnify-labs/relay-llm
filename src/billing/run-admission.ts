@@ -32,7 +32,22 @@ const ADMISSION_TTL_MS =
 export const MAX_ADMITTED_RUNS_PER_USER = 8;
 
 /**
- * Admitted runs: user -> (run -> expiry).
+ * One admitted run: its hard time backstop and its remaining spend headroom.
+ *
+ * `remainingMicroUsd` is the run's budget-aware bound — the (budget − spend) headroom
+ * in integer micro-USD captured at admission, decremented by each of the run's charges
+ * (see {@link chargeRun}). When it reaches ≤ 0 the run is dropped, so its next call is
+ * re-gated. This bounds a run's overage to its admission headroom plus the one in-flight
+ * request that crosses it — NOT the whole `expiresAt` window, which the time-only design
+ * left unmetered (a run could burn arbitrarily much for the full TTL).
+ */
+interface AdmissionEntry {
+  expiresAt: number;
+  remainingMicroUsd: number;
+}
+
+/**
+ * Admitted runs: user -> (run -> entry).
  *
  * Reason: nested per user, not a flat user+run key, so the cap check and the expiry
  * sweep touch only one user's runs (at most MAX_ADMITTED_RUNS_PER_USER) instead of
@@ -45,18 +60,18 @@ export const MAX_ADMITTED_RUNS_PER_USER = 8;
  * another. A single per-user entry would let the newer run evict the older one, whose
  * next call would then be re-budget-checked and 402'd mid-task.
  */
-const admitted = new Map<string, Map<string, number>>();
+const admitted = new Map<string, Map<string, AdmissionEntry>>();
 
 /**
  * Drop this user's closed windows, and the user entry itself once empty.
  *
  * @param userId - The authenticated user.
- * @param runs - That user's run -> expiry map.
+ * @param runs - That user's run -> entry map.
  * @param now - Current time in ms.
  */
-function pruneUser(userId: string, runs: Map<string, number>, now: number): void {
-  for (const [runId, expiresAt] of runs) {
-    if (now >= expiresAt) runs.delete(runId);
+function pruneUser(userId: string, runs: Map<string, AdmissionEntry>, now: number): void {
+  for (const [runId, entry] of runs) {
+    if (now >= entry.expiresAt) runs.delete(runId);
   }
   if (runs.size === 0) admitted.delete(userId);
 }
@@ -72,9 +87,9 @@ function pruneUser(userId: string, runs: Map<string, number>, now: number): void
 export function isRunAdmitted(userId: string, runId: string, now: number = Date.now()): boolean {
   const runs = admitted.get(userId);
   if (!runs) return false;
-  const expiresAt = runs.get(runId);
-  if (expiresAt === undefined) return false;
-  if (now >= expiresAt) {
+  const entry = runs.get(runId);
+  if (entry === undefined) return false;
+  if (now >= entry.expiresAt) {
     // Reason: prune on the read path too. pruneUser only runs on that user's next
     // admitRun, so a user admitted once who then goes idle would otherwise keep their
     // bucket and its expired entries until process exit. The per-user cap bounds
@@ -101,7 +116,8 @@ export function revokeUser(userId: string): void {
 }
 
 /**
- * Admit `runId` for `userId`, opening a fresh hard window.
+ * Admit `runId` for `userId`, opening a fresh window bounded by both a hard time
+ * backstop and the run's spend headroom.
  *
  * Silently does not admit when the user is already at
  * {@link MAX_ADMITTED_RUNS_PER_USER}. That is safe by construction: an unadmitted run
@@ -109,9 +125,17 @@ export function revokeUser(userId: string): void {
  *
  * @param userId - The authenticated user.
  * @param runId - Run id from the X-Dassi-Run-Id header.
+ * @param headroomMicroUsd - The (budget − spend) headroom in integer micro-USD at
+ *   admission. The run may overspend by at most this (plus the one request that crosses
+ *   it) before {@link chargeRun} drops it. Clamped at ≥ 0.
  * @param now - Injectable clock for tests.
  */
-export function admitRun(userId: string, runId: string, now: number = Date.now()): void {
+export function admitRun(
+  userId: string,
+  runId: string,
+  headroomMicroUsd: number,
+  now: number = Date.now(),
+): void {
   let runs = admitted.get(userId);
   if (!runs) {
     runs = new Map();
@@ -121,12 +145,58 @@ export function admitRun(userId: string, runId: string, now: number = Date.now()
   // Reason: refreshing a run we already track must not be capped out — only genuinely
   // new runs beyond the cap are refused.
   if (runs.size >= MAX_ADMITTED_RUNS_PER_USER && !runs.has(runId)) return;
-  runs.set(runId, now + ADMISSION_TTL_MS);
-  // Reason: not redundant with line 118. pruneUser deletes the bucket from `admitted`
-  // whenever it empties — which is exactly a new user's first call (the bucket starts
-  // empty) and any call after all prior runs expired. Mutating `runs` in place is then
-  // not enough because `admitted` no longer references it; this re-inserts the bucket.
+  runs.set(runId, {
+    expiresAt: now + ADMISSION_TTL_MS,
+    remainingMicroUsd: Math.max(0, headroomMicroUsd),
+  });
+  // Reason: not redundant with the set above. pruneUser deletes the bucket from
+  // `admitted` whenever it empties — which is exactly a new user's first call (the
+  // bucket starts empty) and any call after all prior runs expired. Mutating `runs` in
+  // place is then not enough because `admitted` no longer references it; this re-inserts
+  // the bucket.
   admitted.set(userId, runs);
+}
+
+/**
+ * Debit a completed request's cost from its run's remaining headroom, dropping the run
+ * once the headroom is spent so its next call is re-gated against live budget.
+ *
+ * Idempotent-safe against a missing run: a charge for a run that was never admitted (no
+ * runId header) or already dropped/expired is a no-op. Called from the usage-logging
+ * path BEFORE the ledger writes, and unconditionally — the request was served, so the
+ * in-memory bound shrinks even if `incrementUserSpend` later fails.
+ *
+ * @param userId - The authenticated user.
+ * @param runId - Run id from the X-Dassi-Run-Id header.
+ * @param costMicroUsd - The request's cost in integer micro-USD (same value written to
+ *   the ledger).
+ * @param now - Injectable clock for tests.
+ */
+export function chargeRun(
+  userId: string,
+  runId: string,
+  costMicroUsd: number,
+  now: number = Date.now(),
+): void {
+  const runs = admitted.get(userId);
+  if (!runs) return;
+  const entry = runs.get(runId);
+  if (entry === undefined) return;
+  // Reason: an expired run is not admitted; drop it rather than debiting a dead window.
+  if (now >= entry.expiresAt) {
+    runs.delete(runId);
+    if (runs.size === 0) admitted.delete(userId);
+    return;
+  }
+  entry.remainingMicroUsd -= costMicroUsd;
+  // Reason: headroom spent — drop the admission so the run's next call re-reads budget
+  // and 402s if the user is now over. This is the budget-aware bound that replaces the
+  // time-only window: overage per run is capped at its admission headroom plus the
+  // single request that crossed it.
+  if (entry.remainingMicroUsd <= 0) {
+    runs.delete(runId);
+    if (runs.size === 0) admitted.delete(userId);
+  }
 }
 
 /**
@@ -157,4 +227,19 @@ export function admissionCountForTests(): number {
   let total = 0;
   for (const runs of admitted.values()) total += runs.size;
   return total;
+}
+
+/**
+ * Test-only: a run's remaining headroom in µ$, or undefined if not admitted.
+ *
+ * Exposes the budget-aware bound so tests can assert the exact headroom captured at
+ * admission (the µ$ conversion in budget.ts) and the negative-headroom clamp — neither
+ * is observable through isRunAdmitted, which reads only expiresAt.
+ *
+ * @param userId - The authenticated user.
+ * @param runId - Run id.
+ * @returns remainingMicroUsd, or undefined when the run is not tracked.
+ */
+export function runHeadroomForTests(userId: string, runId: string): number | undefined {
+  return admitted.get(userId)?.get(runId)?.remainingMicroUsd;
 }

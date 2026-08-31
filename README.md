@@ -179,8 +179,8 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 # Server
 PORT=8080
 
-# Hard window (ms) a run may keep spending past budget once admitted. Default 30 min.
-# See "Budget enforcement is per-run" below.
+# Memory backstop (ms) for an admitted run that never spends its headroom. Default 30
+# min. Spend is bounded by headroom, not this — see "Budget enforcement is per-run".
 RUN_ADMISSION_TTL_MS=1800000
 ```
 
@@ -201,14 +201,28 @@ following run is refused.
 
 Bounds on that overshoot:
 
-- **`RUN_ADMISSION_TTL_MS`** (default 30 min) is a hard cap, not an idle timer. A run
-  still active at expiry is re-checked: under budget it re-admits, over budget it stops.
-- **8 concurrent admitted runs per user.** Beyond that, runs simply are not admitted
-  and keep per-call gating. `runId` is client-supplied, so this caps both worst-case
-  overspend and the memory an attacker can pin.
+- **Headroom (the primary bound).** At admission a run captures its `(budget − spend)`
+  headroom in micro-USD; each of the run's charges debits it, and the run is dropped
+  once it reaches zero, so the run's *next* call is re-gated. A single run's overage is
+  therefore its admission headroom plus the one request that crosses it — not a whole
+  time window.
+- **`RUN_ADMISSION_TTL_MS`** (default 30 min) is now only a memory backstop for a run
+  that goes idle without spending its headroom; it is not the spend bound.
+- **8 concurrent admitted runs per user.** Beyond that, runs keep per-call gating.
+  `runId` is client-supplied, so this caps the memory an attacker can pin.
 - **Admin writes revoke immediately.** `PUT /users/:user_id/budget` and
   `DELETE /users/:user_id` drop the user's admissions, so lowering or zeroing a budget
-  takes effect on the user's very next call rather than after the window closes.
+  takes effect on the user's very next call.
+
+Two overshoot gaps remain, both bounded and slated for a follow-up (atomic headroom
+reservation at admission):
+
+- **Concurrent runs off one stale read.** Runs admitted before any spend lands each
+  capture the *same* headroom independently, so worst-case overage across a user is
+  `N × (budget − spend)` (N ≤ 8), not a single budget's worth.
+- **In-flight calls on one run.** `isRunAdmitted` reserves nothing, so N calls on the
+  same admitted run all pass before the first charge debits (a streaming call debits
+  only after its body drains). Per-run overage is then `headroom + N × cost_per_request`.
 
 Requests **without** an `X-Dassi-Run-Id` header keep per-call enforcement unchanged, so
 older clients are unaffected.
