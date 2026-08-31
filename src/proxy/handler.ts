@@ -84,6 +84,7 @@ function buildUpstreamHeaders(
 export function proxyHandler(provider: ProviderName): MiddlewareHandler {
   return async (c: Context) => {
     const userId = c.get('userId') as string;
+    const runId = c.req.header('x-dassi-run-id') ?? null;
     const requestId = crypto.randomUUID();
     const startTime = Date.now();
 
@@ -137,7 +138,7 @@ export function proxyHandler(provider: ProviderName): MiddlewareHandler {
         const [clientStream, usageStream] = upstreamResponse.body.tee();
 
         // Async usage extraction — does not block the client stream
-        extractAndLogUsage(usageStream, provider, userId, requestId, latencyMs).catch(
+        extractAndLogUsage(usageStream, provider, userId, runId, requestId, latencyMs).catch(
           (err) => {
             const msg = err instanceof Error ? err.message : 'Unknown error';
             console.error(`[Relay] Usage logging failed: ${msg}`);
@@ -157,6 +158,7 @@ export function proxyHandler(provider: ProviderName): MiddlewareHandler {
           new Uint8Array(responseBody),
           provider,
           userId,
+          runId,
           requestId,
           latencyMs,
           upstreamResponse.status,
@@ -191,6 +193,7 @@ async function extractAndLogUsage(
   stream: ReadableStream<Uint8Array>,
   provider: ProviderName,
   userId: string,
+  runId: string | null,
   requestId: string,
   latencyMs: number,
 ): Promise<void> {
@@ -213,6 +216,7 @@ async function extractAndLogUsage(
   if (usage) {
     await logUsage({
       userId,
+      runId,
       provider,
       model: usage.model || 'unknown',
       inputTokens: usage.inputTokens,
@@ -233,6 +237,7 @@ async function extractAndLogUsageFromBody(
   body: Uint8Array,
   provider: ProviderName,
   userId: string,
+  runId: string | null,
   requestId: string,
   latencyMs: number,
   statusCode: number,
@@ -242,6 +247,7 @@ async function extractAndLogUsageFromBody(
   if (usage) {
     await logUsage({
       userId,
+      runId,
       provider,
       model: usage.model || 'unknown',
       inputTokens: usage.inputTokens,

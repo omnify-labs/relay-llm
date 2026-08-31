@@ -13,7 +13,11 @@ vi.mock('../db/queries.js', () => ({
 }));
 
 import { budgetMiddleware } from '../billing/budget.js';
-import { admitRun, __resetAdmissionsForTests } from '../billing/run-admission.js';
+import {
+  admitRun,
+  isRunAdmitted,
+  __resetAdmissionsForTests,
+} from '../billing/run-admission.js';
 
 /**
  * Build a test app with budget middleware.
@@ -112,9 +116,19 @@ describe('budgetMiddleware — per-run admission', () => {
     expect(res.status).toBe(200);
   });
 
+  it('admits a new run with the (budget - spend) headroom in micro-USD', async () => {
+    // Reason: the gate must hand admitRun a budget-aware bound, not just open a window.
+    // budget 25 - spend 10 = $15 headroom = 15,000,000 µ$; the run stays admitted while
+    // its charges stay under that.
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10 });
+    const app = buildTestApp();
+    await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-hr' } });
+    expect(isRunAdmitted('user-42', 'run-hr')).toBe(true);
+  });
+
   it('bypasses the budget query for an already-admitted in-flight run', async () => {
     // Pre-admit the run; even though spend >= budget, the in-flight call must pass.
-    admitRun('user-42', 'run-1');
+    admitRun('user-42', 'run-1', 5_000_000);
     const app = buildTestApp();
     const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-1' } });
     expect(res.status).toBe(200);
