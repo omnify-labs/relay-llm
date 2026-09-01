@@ -179,8 +179,9 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 # Server
 PORT=8080
 
-# Memory backstop (ms) for an admitted run that never spends its headroom. Default 30
-# min. Spend is bounded by headroom, not this — see "Budget enforcement is per-run".
+# Sliding idle window (ms) for an admitted run — refreshed on each call, so it only
+# lapses after the run goes quiet. Backstop for a lost end signal (see "Budget
+# enforcement is per-run"); the normal reclamation is POST /v1/runs/:runId/end.
 RUN_ADMISSION_TTL_MS=1800000
 ```
 
@@ -196,33 +197,31 @@ meant a user whose credit ran out mid-task got a 402 on the next call and lost t
 run's partial work. Now the "out of credit" stop lands at a **task boundary**: the
 *next* run's first call is refused, before any visible work.
 
-Spend is still recorded on every call, so an admitted run simply overshoots and the
-following run is refused.
+The current run continues to completion regardless of how much it spends — a task is
+never interrupted mid-run. Spend is still recorded on every call, so the run overshoots
+and only the *following* run is refused.
 
-Bounds on that overshoot:
+A run stays admitted until it ends. Two reclamation paths:
 
-- **Headroom (the primary bound).** At admission a run captures its `(budget − spend)`
-  headroom in micro-USD; each of the run's charges debits it, and the run is dropped
-  once it reaches zero, so the run's *next* call is re-gated. A single run's overage is
-  therefore its admission headroom plus the one request that crosses it — not a whole
-  time window.
-- **`RUN_ADMISSION_TTL_MS`** (default 30 min) is now only a memory backstop for a run
-  that goes idle without spending its headroom; it is not the spend bound.
+- **End signal (primary).** The extension calls `POST /v1/runs/:runId/end` when the
+  agent run completes, dropping that run's admission at once so the user's next run is
+  gated immediately. Scoped to the caller's own `userId`; idempotent.
+- **Idle window (backstop).** `RUN_ADMISSION_TTL_MS` (default 30 min) is a *sliding*
+  window refreshed on every admitted call — so an active run is never cut off, however
+  long or costly. It only lapses after the run goes quiet (e.g. a browser crash that
+  never sent the end signal), reclaiming the entry.
+
+Other bounds:
+
 - **8 concurrent admitted runs per user.** Beyond that, runs keep per-call gating.
   `runId` is client-supplied, so this caps the memory an attacker can pin.
 - **Admin writes revoke immediately.** `PUT /users/:user_id/budget` and
   `DELETE /users/:user_id` drop the user's admissions, so lowering or zeroing a budget
   takes effect on the user's very next call.
 
-Two overshoot gaps remain, both bounded and slated for a follow-up (atomic headroom
-reservation at admission):
-
-- **Concurrent runs off one stale read.** Runs admitted before any spend lands each
-  capture the *same* headroom independently, so worst-case overage across a user is
-  `N × (budget − spend)` (N ≤ 8), not a single budget's worth.
-- **In-flight calls on one run.** `isRunAdmitted` reserves nothing, so N calls on the
-  same admitted run all pass before the first charge debits (a streaming call debits
-  only after its body drains). Per-run overage is then `headroom + N × cost_per_request`.
+By design there is no per-run overspend *amount* cap: an admitted run may finish over
+budget by whatever it spends before it ends. This is the product choice — never cut off
+a task in progress; gate the next one. A per-run in-flight cap is out of scope.
 
 Requests **without** an `X-Dassi-Run-Id` header keep per-call enforcement unchanged, so
 older clients are unaffected.

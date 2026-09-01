@@ -45,13 +45,10 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
       return c.json({ error: 'Budget exceeded' }, 402);
     }
 
-    // Reason: new run (or a run past its admission window) with budget available — admit
-    // it so its remaining calls are not interrupted mid-task, bounded by the headroom
-    // captured here. µ$ integer to match the ledger; chargeRun debits it per request.
-    if (runId) {
-      const headroomMicroUsd = Math.round((budget.budget - budget.spend) * 1_000_000);
-      admitRun(userId, runId, headroomMicroUsd);
-    }
+    // Reason: new run (or one whose idle window lapsed) with budget available — admit it so
+    // the rest of THIS run is not interrupted mid-task. It stays admitted until it ends
+    // (endRun) or idles out; the gate lands on the NEXT run's first call.
+    if (runId) admitRun(userId, runId);
 
     await next();
   } catch (error) {

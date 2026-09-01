@@ -6,7 +6,6 @@
 
 import { insertUsageLog, incrementUserSpend } from '../db/queries.js';
 import { calculateCostMicroUsd, safeTokenCount } from './pricing.js';
-import { chargeRun } from './run-admission.js';
 import type { ProviderName } from '../proxy/providers.js';
 
 export interface UsageRecord {
@@ -20,8 +19,6 @@ export interface UsageRecord {
   requestId: string;
   latencyMs: number;
   statusCode: number;
-  /** Run id from X-Dassi-Run-Id, or null for a request with no run. Debits admission headroom. */
-  runId?: string | null;
 }
 
 /**
@@ -50,12 +47,6 @@ export async function logUsage(record: UsageRecord): Promise<void> {
     calculateCostMicroUsd(record.model, inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens),
   );
   const totalTokens = inputTokens + outputTokens;
-
-  // Reason: debit the run's admission headroom by this request's cost regardless of the
-  // DB writes below — the request was served and the cost incurred, so the in-memory
-  // budget bound must shrink even if the ledger write later fails. Drops the run once
-  // its headroom is spent so the next call is re-gated. No-op without a runId.
-  if (record.runId) chargeRun(record.userId, record.runId, costMicroUsd);
 
   // Run both independently so a failure in one doesn't block or duplicate the other
   const [spendResult, logResult] = await Promise.allSettled([
