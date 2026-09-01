@@ -27,10 +27,15 @@ This repository hosts **Relay LLM** — a thin, transparent LLM proxy that forwa
   Once admitted, a run's later calls are forwarded **without re-checking budget**, so a
   multi-step task is never cut off mid-flight when credit runs out. The "out of credit"
   stop lands at the next run's first call, a clean task boundary.
-- This is a **deliberate, bounded** trade-off, not a hole in the rule above. Spend is
-  still recorded on **every** call (fully accounted, still fail-closed on a DB error),
-  and overshoot is capped by: a hard admission window (`RUN_ADMISSION_TTL_MS`, 30 min),
-  a per-user concurrent-admission cap, and immediate revocation on admin budget writes.
+- This is a **deliberate** trade-off, not a hole in the rule above. Spend is still
+  recorded on **every** call (fully accounted, still fail-closed on a DB error). An
+  admitted run runs to **completion** — it is never cut off mid-run, and by design there
+  is no per-run overspend *amount* cap; the gate lands on the **next** run.
+- A run stays admitted until it ends. Reclamation: the extension's explicit end signal
+  (`POST /v1/runs/:runId/end`, primary — drops the admission at once) and a **sliding**
+  idle window (`RUN_ADMISSION_TTL_MS`, refreshed on every admitted call — an active run
+  is never cut off; it only lapses after the run goes quiet, e.g. a lost end signal).
+  Plus a per-user concurrent-admission cap and immediate revocation on admin budget writes.
 - Requests **without** `X-Dassi-Run-Id` keep strict per-call enforcement (older clients).
 - See `src/billing/run-admission.ts`, `budget.ts`, and README → "Budget enforcement is
   per-run".
