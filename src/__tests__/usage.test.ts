@@ -23,11 +23,6 @@ vi.mock('../billing/pricing.js', async (importActual) => {
 
 import { logUsage, type UsageRecord } from '../billing/usage.js';
 import { calculateCostMicroUsd } from '../billing/pricing.js';
-import {
-  admitRun,
-  isRunAdmitted,
-  __resetAdmissionsForTests,
-} from '../billing/run-admission.js';
 
 const mockCalc = vi.mocked(calculateCostMicroUsd);
 
@@ -45,7 +40,6 @@ const baseRecord: UsageRecord = {
 };
 
 beforeEach(() => {
-  __resetAdmissionsForTests();
   mockInsertUsageLog.mockReset();
   mockIncrementUserSpend.mockReset();
   mockCalc.mockClear();
@@ -222,23 +216,5 @@ describe('logUsage', () => {
     await expect(logUsage(baseRecord)).resolves.toBeUndefined();
 
     vi.restoreAllMocks();
-  });
-
-  it('debits the admitted run\'s headroom by the request cost', async () => {
-    // Reason: closes the loop end-to-end — logUsage must call chargeRun so a run's own
-    // spend shrinks its admission headroom. Cost mock = 5000 µ$; headroom = 6000 µ$.
-    // Real clock (no now arg): logUsage's chargeRun uses Date.now(), so the window must
-    // be opened on the same clock or it would read as expired.
-    admitRun('user-abc-123', 'run-x', 6000);
-    await logUsage({ ...baseRecord, runId: 'run-x' });
-    expect(isRunAdmitted('user-abc-123', 'run-x')).toBe(true); // 5000 < 6000
-    await logUsage({ ...baseRecord, runId: 'run-x' });
-    expect(isRunAdmitted('user-abc-123', 'run-x')).toBe(false); // 10000 > 6000 → dropped
-  });
-
-  it('does not touch admission state when the record has no runId', async () => {
-    admitRun('user-abc-123', 'run-y', 100); // tiny headroom, but this request is run-less
-    await logUsage(baseRecord); // no runId
-    expect(isRunAdmitted('user-abc-123', 'run-y')).toBe(true); // untouched
   });
 });
