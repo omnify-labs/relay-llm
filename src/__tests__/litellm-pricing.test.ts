@@ -103,7 +103,7 @@ describe('litellm-pricing', () => {
 
   it('logs a loud error at table build when a served model has no price', async () => {
     // Reason: covers the buildPricingTable() missing-model branch — a silent gap
-    // here means DEFAULT_PRICING overcharge in production, so the error must fire.
+    // here means CEILING-pricing overcharge in production, so the error must fire.
     vi.resetModules();
     vi.doMock('../../vendor/litellm/model_prices_and_context_window.json', () => ({ default: {} }));
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});

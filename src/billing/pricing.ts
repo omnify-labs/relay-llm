@@ -1,16 +1,60 @@
 import { PRICING, type ModelPricing } from './litellm-pricing.js';
 
 /**
- * Default pricing for unknown models — intentionally conservative (overestimates cost)
- * so we never undercharge for unrecognized models.
+ * Billing for an UNKNOWN model id (not in the served table) — fail closed.
+ *
+ * The proxy forwards any model a client names; a returned id that is not in PRICING
+ * must never be billed at a rate cheaper than what the provider actually charges us.
+ * So there is no "default price": an unknown id is billed at the CEILING — for every
+ * component, the most expensive rate across all served models, floored by a hard
+ * conservative-high constant so even an empty/cheap table cannot produce a cheap
+ * fallback. Unknown ids can only ever be OVER-billed, never under. Each unknown id is
+ * logged once so allowlist gaps surface instead of silently costing money.
  */
-// Reason: charge cached tokens at the full input rate (no discount) for unknown models.
-const DEFAULT_PRICING: ModelPricing = {
-  inputPerMillion: 3.0, outputPerMillion: 15.0,
-  cachedInputPerMillion: 3.0, cacheCreationPerMillion: 3.0,
-  inputMicro: 3_000_000n, outputMicro: 15_000_000n,
-  cachedInputMicro: 3_000_000n, cacheCreationMicro: 3_000_000n,
-};
+// The most expensive tier any provider we proxy sells today ($15/M in, $75/M out);
+// cache reads at full input rate (no discount), cache writes at 1.25x input.
+const CEILING_FLOOR = {
+  inputMicro: 15_000_000n,
+  outputMicro: 75_000_000n,
+  cachedInputMicro: 15_000_000n,
+  cacheCreationMicro: 18_750_000n,
+} as const;
+
+function maxMicro(...values: (bigint | undefined)[]): bigint {
+  let m = 0n;
+  for (const v of values) if (v !== undefined && v > m) m = v;
+  return m;
+}
+
+/** Per-component max across the served table, floored by CEILING_FLOOR. */
+function buildCeilingPricing(table: Record<string, ModelPricing>): ModelPricing {
+  const rows = Object.values(table);
+  const inputMicro = maxMicro(CEILING_FLOOR.inputMicro, ...rows.map((r) => r.inputMicro), ...rows.map((r) => r.inputMicroAbove200k));
+  const outputMicro = maxMicro(CEILING_FLOOR.outputMicro, ...rows.map((r) => r.outputMicro), ...rows.map((r) => r.outputMicroAbove200k));
+  const cachedInputMicro = maxMicro(CEILING_FLOOR.cachedInputMicro, ...rows.map((r) => r.cachedInputMicro), ...rows.map((r) => r.cachedInputMicroAbove200k));
+  const cacheCreationMicro = maxMicro(CEILING_FLOOR.cacheCreationMicro, ...rows.map((r) => r.cacheCreationMicro));
+  // Float fields are derived from the same integers so the two encodings cannot drift.
+  return {
+    inputMicro, outputMicro, cachedInputMicro, cacheCreationMicro,
+    inputPerMillion: Number(inputMicro) / 1e6,
+    outputPerMillion: Number(outputMicro) / 1e6,
+    cachedInputPerMillion: Number(cachedInputMicro) / 1e6,
+    cacheCreationPerMillion: Number(cacheCreationMicro) / 1e6,
+  };
+}
+
+export const CEILING_PRICING: ModelPricing = buildCeilingPricing(PRICING);
+
+const warnedUnknownModels = new Set<string>();
+function pricingFor(model: string): ModelPricing {
+  const known = PRICING[model];
+  if (known) return known;
+  if (!warnedUnknownModels.has(model)) {
+    warnedUnknownModels.add(model);
+    console.warn(`[Relay] Unknown model id billed at CEILING pricing: ${model}`);
+  }
+  return CEILING_PRICING;
+}
 
 /**
  * Coerce a provider-reported token count to a safe non-negative integer.
@@ -55,7 +99,7 @@ export function calculateCostMicroUsd(
   cachedInputTokens: number,
   cacheCreationTokens: number,
 ): bigint {
-  const pricing = PRICING[model] || DEFAULT_PRICING;
+  const pricing = pricingFor(model);
 
   // Reason: sanitize BEFORE any arithmetic — everything below assumes non-negative
   // integers (see safeTokenCount).
