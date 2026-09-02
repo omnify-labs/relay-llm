@@ -1,4 +1,10 @@
-import { PRICING, type ModelPricing } from './litellm-pricing.js';
+import {
+  PRICING,
+  liveProxiedEntries,
+  toMicro,
+  type LiteLLMEntry,
+  type ModelPricing,
+} from './litellm-pricing.js';
 
 /**
  * Billing for an UNKNOWN model id (not in the served table) — fail closed.
@@ -6,34 +12,70 @@ import { PRICING, type ModelPricing } from './litellm-pricing.js';
  * The proxy forwards any model a client names; a returned id that is not in PRICING
  * must never be billed at a rate cheaper than what the provider actually charges us.
  * So there is no "default price": an unknown id is billed at the CEILING — for every
- * component, the most expensive rate across all served models, floored by a hard
- * conservative-high constant so even an empty/cheap table cannot produce a cheap
- * fallback. Unknown ids can only ever be OVER-billed, never under. Each unknown id is
- * logged once so allowlist gaps surface instead of silently costing money.
+ * component, the most expensive rate across EVERY live model the proxied providers
+ * sell (the whole vendored table, not just served models — a client can name
+ * o1-pro or gpt-4 just as easily as gpt-4o), including above-200k and 1-hour-cache
+ * tiers, floored by a hard conservative-high constant so even an empty table cannot
+ * produce a cheap fallback. Unknown ids can only ever be OVER-billed, never under.
+ * Each unknown id is logged once so allowlist gaps surface instead of silently
+ * costing money.
  */
-// The most expensive tier any provider we proxy sells today ($15/M in, $75/M out);
-// cache reads at full input rate (no discount), cache writes at 1.25x input.
+// Backstop only — the derived ceiling from the vendored table normally dominates.
 const CEILING_FLOOR = {
-  inputMicro: 15_000_000n,
-  outputMicro: 75_000_000n,
-  cachedInputMicro: 15_000_000n,
-  cacheCreationMicro: 18_750_000n,
+  inputMicro: 30_000_000n,
+  outputMicro: 120_000_000n,
+  cachedInputMicro: 30_000_000n,
+  cacheCreationMicro: 37_500_000n,
 } as const;
 
-function maxMicro(...values: (bigint | undefined)[]): bigint {
+// Reason: guard the ceiling against a corrupt upstream row (LiteLLM has had entries
+// mis-scaled by 1e6). Nothing a proxied provider sells is anywhere near $5,000/M.
+const MAX_SANE_PER_TOKEN = 0.005;
+
+function saneMicro(perToken: number | undefined): bigint {
+  if (perToken === undefined || !Number.isFinite(perToken) || perToken <= 0) return 0n;
+  if (perToken > MAX_SANE_PER_TOKEN) return 0n;
+  return toMicro(perToken);
+}
+
+function maxMicro(...values: bigint[]): bigint {
   let m = 0n;
-  for (const v of values) if (v !== undefined && v > m) m = v;
+  for (const v of values) if (v > m) m = v;
   return m;
 }
 
-/** Per-component max across the served table, floored by CEILING_FLOOR. */
-function buildCeilingPricing(table: Record<string, ModelPricing>): ModelPricing {
-  const rows = Object.values(table);
-  const inputMicro = maxMicro(CEILING_FLOOR.inputMicro, ...rows.map((r) => r.inputMicro), ...rows.map((r) => r.inputMicroAbove200k));
-  const outputMicro = maxMicro(CEILING_FLOOR.outputMicro, ...rows.map((r) => r.outputMicro), ...rows.map((r) => r.outputMicroAbove200k));
-  const cachedInputMicro = maxMicro(CEILING_FLOOR.cachedInputMicro, ...rows.map((r) => r.cachedInputMicro), ...rows.map((r) => r.cachedInputMicroAbove200k));
-  const cacheCreationMicro = maxMicro(CEILING_FLOOR.cacheCreationMicro, ...rows.map((r) => r.cacheCreationMicro));
-  // Float fields are derived from the same integers so the two encodings cannot drift.
+/**
+ * Build the ceiling from the live proxied entries.
+ *
+ * @param entries - Raw LiteLLM entries to bound by (see liveProxiedEntries).
+ * @returns Per-component max, floored by CEILING_FLOOR, with float fields derived from
+ *   the integers so the two encodings cannot drift.
+ */
+export function buildCeilingPricing(entries: LiteLLMEntry[]): ModelPricing {
+  const inputMicro = maxMicro(
+    CEILING_FLOOR.inputMicro,
+    ...entries.map((e) => saneMicro(e.input_cost_per_token)),
+    ...entries.map((e) => saneMicro(e.input_cost_per_token_above_200k_tokens)),
+  );
+  const outputMicro = maxMicro(
+    CEILING_FLOOR.outputMicro,
+    ...entries.map((e) => saneMicro(e.output_cost_per_token)),
+    ...entries.map((e) => saneMicro(e.output_cost_per_token_above_200k_tokens)),
+  );
+  // Reason: no cache discount for unknown ids — cached reads never bill below the
+  // input ceiling.
+  const cachedInputMicro = maxMicro(
+    CEILING_FLOOR.cachedInputMicro,
+    inputMicro,
+    ...entries.map((e) => saneMicro(e.cache_read_input_token_cost)),
+    ...entries.map((e) => saneMicro(e.cache_read_input_token_cost_above_200k_tokens)),
+  );
+  const cacheCreationMicro = maxMicro(
+    CEILING_FLOOR.cacheCreationMicro,
+    inputMicro,
+    ...entries.map((e) => saneMicro(e.cache_creation_input_token_cost)),
+    ...entries.map((e) => saneMicro(e.cache_creation_input_token_cost_above_1hr)),
+  );
   return {
     inputMicro, outputMicro, cachedInputMicro, cacheCreationMicro,
     inputPerMillion: Number(inputMicro) / 1e6,
@@ -43,11 +85,27 @@ function buildCeilingPricing(table: Record<string, ModelPricing>): ModelPricing 
   };
 }
 
-export const CEILING_PRICING: ModelPricing = buildCeilingPricing(PRICING);
+export const CEILING_PRICING: ModelPricing = buildCeilingPricing(liveProxiedEntries().map(([, e]) => e));
+
+// Reason: OpenAI echoes the dated snapshot id (gpt-4o-2024-08-06) for a request that
+// named the bare id (gpt-4o). Without this, EVERY served OpenAI model would fall to the
+// ceiling. LiteLLM prices the snapshot identically to the bare id.
+const SNAPSHOT_SUFFIX = /-\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Resolve a provider-returned model id to a served pricing row, tolerating dated
+ * OpenAI snapshot suffixes.
+ *
+ * @param model - Model id as returned by the provider.
+ * @returns The served pricing, or undefined when the id is genuinely unknown.
+ */
+export function resolveServedPricing(model: string): ModelPricing | undefined {
+  return PRICING[model] ?? PRICING[model.replace(SNAPSHOT_SUFFIX, '')];
+}
 
 const warnedUnknownModels = new Set<string>();
 function pricingFor(model: string): ModelPricing {
-  const known = PRICING[model];
+  const known = resolveServedPricing(model);
   if (known) return known;
   if (!warnedUnknownModels.has(model)) {
     warnedUnknownModels.add(model);

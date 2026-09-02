@@ -1,62 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { parseUsageFromBody, parseUsageFromSSE } from '../proxy/handler.js';
 
 /**
- * Test the usage parsing logic from handler.ts.
- * We extract and test the parsing functions directly.
+ * Tests the REAL usage parsers exported from handler.ts (previously a hand-copied
+ * re-implementation, which could not catch drift such as the Responses-API shape).
  */
 
-// Re-implement parsing logic here for unit testing
-// (In production, these would be exported from handler.ts)
-
-interface ParsedUsage {
-  model: string | null;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  cacheCreationTokens: number;
-}
-
-function parseUsageFromBody(body: string, provider: 'openai' | 'anthropic' | 'google'): ParsedUsage | null {
-  try {
-    const json = JSON.parse(body);
-    switch (provider) {
-      case 'openai':
-        return {
-          model: json.model,
-          inputTokens: json.usage?.prompt_tokens || 0,
-          outputTokens: json.usage?.completion_tokens || 0,
-          cachedInputTokens: json.usage?.prompt_tokens_details?.cached_tokens || 0,
-          cacheCreationTokens: 0,
-        };
-      case 'anthropic': {
-        const baseInput = json.usage?.input_tokens || 0;
-        const cacheRead = json.usage?.cache_read_input_tokens || 0;
-        const cacheCreate = json.usage?.cache_creation_input_tokens || 0;
-        return {
-          model: json.model,
-          // Reason: Anthropic's input_tokens does NOT include cache tokens.
-          // Normalize to total for consistent cost calculation.
-          inputTokens: baseInput + cacheRead + cacheCreate,
-          outputTokens: json.usage?.output_tokens || 0,
-          cachedInputTokens: cacheRead,
-          cacheCreationTokens: cacheCreate,
-        };
-      }
-      case 'google':
-        return {
-          model: json.modelVersion || null,
-          inputTokens: json.usageMetadata?.promptTokenCount || 0,
-          outputTokens: json.usageMetadata?.candidatesTokenCount || 0,
-          cachedInputTokens: json.usageMetadata?.cachedContentTokenCount || 0,
-          cacheCreationTokens: 0,
-        };
-      default:
-        return null;
-    }
-  } catch {
-    return null;
-  }
-}
 
 describe('parseUsageFromBody', () => {
   it('parses OpenAI response usage', () => {
@@ -204,87 +153,6 @@ describe('parseUsageFromBody', () => {
  * Re-implements parseUsageFromSSE locally for testing.
  */
 
-function parseUsageFromSSE(
-  sseText: string,
-  provider: 'openai' | 'anthropic' | 'google',
-): ParsedUsage | null {
-  const lines = sseText.split('\n');
-  let lastModel: string | null = null;
-  let lastUsage: ParsedUsage | null = null;
-
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
-    const data = line.slice(6).trim();
-    if (data === '[DONE]') continue;
-
-    try {
-      const json = JSON.parse(data);
-
-      switch (provider) {
-        case 'openai':
-          if (json.model) lastModel = json.model;
-          if (json.usage) {
-            lastUsage = {
-              model: lastModel,
-              inputTokens: json.usage.prompt_tokens || 0,
-              outputTokens: json.usage.completion_tokens || 0,
-              cachedInputTokens: json.usage.prompt_tokens_details?.cached_tokens || 0,
-              cacheCreationTokens: 0,
-            };
-          }
-          break;
-        case 'anthropic': {
-          if (json.type === 'message_start' && json.message?.model) {
-            lastModel = json.message.model;
-          }
-          if (json.type === 'message_start' && json.message?.usage) {
-            const u = json.message.usage;
-            const baseInput = u.input_tokens || 0;
-            const cacheRead = u.cache_read_input_tokens || 0;
-            const cacheCreate = u.cache_creation_input_tokens || 0;
-            lastUsage = {
-              model: lastModel,
-              inputTokens: baseInput + cacheRead + cacheCreate,
-              outputTokens: u.output_tokens || 0,
-              cachedInputTokens: cacheRead,
-              cacheCreationTokens: cacheCreate,
-            };
-          }
-          if (json.type === 'message_delta' && json.usage) {
-            if (lastUsage) {
-              lastUsage.outputTokens = json.usage.output_tokens || 0;
-            } else {
-              lastUsage = {
-                model: lastModel,
-                inputTokens: 0,
-                outputTokens: json.usage.output_tokens || 0,
-                cachedInputTokens: 0,
-                cacheCreationTokens: 0,
-              };
-            }
-          }
-          break;
-        }
-        case 'google':
-          if (json.usageMetadata) {
-            lastUsage = {
-              model: json.modelVersion || lastModel,
-              inputTokens: json.usageMetadata.promptTokenCount || 0,
-              outputTokens: json.usageMetadata.candidatesTokenCount || 0,
-              cachedInputTokens: json.usageMetadata.cachedContentTokenCount || 0,
-              cacheCreationTokens: 0,
-            };
-          }
-          break;
-      }
-    } catch {
-      // Skip unparseable SSE chunks
-    }
-  }
-
-  return lastUsage;
-}
-
 describe('parseUsageFromSSE — cache token extraction', () => {
   it('extracts OpenAI cached tokens from streaming final chunk', () => {
     const sse = [
@@ -347,5 +215,59 @@ describe('parseUsageFromSSE — cache token extraction', () => {
   it('handles malformed JSON in SSE gracefully', () => {
     const sse = 'data: {not valid json}\ndata: [DONE]\n';
     expect(parseUsageFromSSE(sse, 'openai')).toBeNull();
+  });
+});
+
+describe('OpenAI Responses API usage shape', () => {
+  it('parses input_tokens/output_tokens (and cached) from a Responses body', () => {
+    // Reason: the Responses API (o1-pro, gpt-5.x-pro) reports input_tokens/output_tokens,
+    // not prompt_tokens/completion_tokens. Missing this shape logged those requests at
+    // 0 tokens — billed $0 — regardless of any pricing.
+    const body = JSON.stringify({
+      id: 'resp_1',
+      model: 'o1-pro',
+      usage: { input_tokens: 1200, output_tokens: 340, input_tokens_details: { cached_tokens: 200 } },
+    });
+    expect(parseUsageFromBody(body, 'openai')).toEqual({
+      model: 'o1-pro',
+      inputTokens: 1200,
+      outputTokens: 340,
+      cachedInputTokens: 200,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it('still parses the Chat Completions shape (prompt_tokens wins when both present)', () => {
+    const body = JSON.stringify({
+      model: 'gpt-4o-2024-08-06',
+      usage: { prompt_tokens: 50, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 10 } },
+    });
+    expect(parseUsageFromBody(body, 'openai')).toMatchObject({
+      model: 'gpt-4o-2024-08-06',
+      inputTokens: 50,
+      outputTokens: 7,
+      cachedInputTokens: 10,
+    });
+  });
+
+  it('parses a Responses SSE stream: model + usage ride on the response.completed event', () => {
+    const sse = [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp_1","model":"o1-pro"}}',
+      '',
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"hi"}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"id":"resp_1","model":"o1-pro","usage":{"input_tokens":900,"output_tokens":120,"input_tokens_details":{"cached_tokens":100}}}}',
+      '',
+    ].join('\n');
+    expect(parseUsageFromSSE(sse, 'openai')).toEqual({
+      model: 'o1-pro',
+      inputTokens: 900,
+      outputTokens: 120,
+      cachedInputTokens: 100,
+      cacheCreationTokens: 0,
+    });
   });
 });

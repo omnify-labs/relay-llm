@@ -33,14 +33,18 @@ export interface ModelPricing {
 }
 
 /** Only the LiteLLM fields relay consumes; the file has many more we ignore. */
-interface LiteLLMEntry {
+export interface LiteLLMEntry {
   input_cost_per_token?: number;
   output_cost_per_token?: number;
   cache_read_input_token_cost?: number;
   cache_creation_input_token_cost?: number;
+  cache_creation_input_token_cost_above_1hr?: number;
   input_cost_per_token_above_200k_tokens?: number;
   output_cost_per_token_above_200k_tokens?: number;
   cache_read_input_token_cost_above_200k_tokens?: number;
+  litellm_provider?: string;
+  mode?: string;
+  deprecation_date?: string;
 }
 
 const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>; // Reason: the JSON import infers a deep literal type; `as unknown` widens it to a typed Record without @ts-ignore.
@@ -82,6 +86,44 @@ export const SERVED_MODELS: readonly string[] = [
   'gemini-2.5-pro-preview', 'gemini-2.0-flash',
 ];
 
+/**
+ * Providers relay can reach (src/index.ts routes) as LiteLLM names them. Gemini rows
+ * appear under both `gemini` and `vertex_ai-language-models`.
+ */
+const PROXIED_PROVIDERS = new Set(['openai', 'anthropic', 'gemini', 'vertex_ai-language-models']);
+const BILLABLE_MODES = new Set(['chat', 'responses']);
+
+/**
+ * Whether an entry is a model a client could plausibly name through relay today:
+ * a proxied provider, a chat/responses model, and not past its deprecation date.
+ *
+ * @param entry - Raw LiteLLM entry.
+ * @param today - ISO date (YYYY-MM-DD) to evaluate deprecation against; injectable for tests.
+ * @returns True when the entry should bound the ceiling price for unknown ids.
+ */
+export function isLiveProxiedEntry(entry: LiteLLMEntry, today: string): boolean {
+  return (
+    PROXIED_PROVIDERS.has(entry.litellm_provider ?? '') &&
+    BILLABLE_MODES.has(entry.mode ?? '') &&
+    (!entry.deprecation_date || entry.deprecation_date > today)
+  );
+}
+
+/**
+ * Every live proxied entry in the vendored table (NOT just served models). Feeds the
+ * ceiling for unknown ids: the proxy forwards any model a client names, so the ceiling
+ * must cover the most expensive thing a provider will actually serve, not the most
+ * expensive thing we chose to list.
+ *
+ * @param today - ISO date for the deprecation check; defaults to now.
+ * @returns Raw entries with their LiteLLM keys.
+ */
+export function liveProxiedEntries(
+  today: string = new Date().toISOString().slice(0, 10),
+): Array<[string, LiteLLMEntry]> {
+  return Object.entries(RAW).filter(([, e]) => isLiveProxiedEntry(e, today));
+}
+
 /** relay model id -> LiteLLM key, for the few that don't match exactly. */
 export const ALIASES: Record<string, string> = {
   'gemini-2.5-pro-preview': 'gemini-2.5-pro',
@@ -96,7 +138,7 @@ function toMillion(perToken: number | undefined): number {
  * @param perToken - Per-token USD price from the LiteLLM table (or undefined).
  * @returns Integer µ$/Mtok as bigint (0n when the price is absent).
  */
-function toMicro(perToken: number | undefined): bigint {
+export function toMicro(perToken: number | undefined): bigint {
   // Reason: one exact translation of the published price at table-build time
   // (µ$/Mtok = $/tok × 1e12). Real prices have ≤12 decimal places per token, so
   // round() only strips binary-float noise, never real price digits.

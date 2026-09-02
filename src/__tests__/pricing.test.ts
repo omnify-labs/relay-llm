@@ -1,6 +1,19 @@
 import { describe, it, expect, vi } from 'vitest';
-import { calculateCost, calculateCostMicroUsd, CEILING_PRICING } from '../billing/pricing.js';
-import { PRICING, type ModelPricing } from '../billing/litellm-pricing.js';
+import {
+  calculateCost,
+  calculateCostMicroUsd,
+  buildCeilingPricing,
+  resolveServedPricing,
+  CEILING_PRICING,
+} from '../billing/pricing.js';
+import {
+  PRICING,
+  liveProxiedEntries,
+  isLiveProxiedEntry,
+  toMicro,
+  type LiteLLMEntry,
+  type ModelPricing,
+} from '../billing/litellm-pricing.js';
 
 // helper: expected simple in+out cost from the live table
 const io = (m: string, inTok: number, outTok: number) =>
@@ -263,22 +276,89 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     expect(calculateCostMicroUsd('unknown-model-xyz', 1000, 500, 0, 0)).toBe(exp);
   });
 
-  it('ceiling is the per-component max of the served table, never below the hard floor', () => {
-    // Reason: unknown ids can only ever be OVER-billed. Every served rate (including
-    // above-200k tiers) must be <= the ceiling component, and the ceiling must respect
-    // the conservative-high floor ($15/M in, $75/M out) even if the table were cheap.
+  it('ceiling is >= every component of every LIVE proxied entry in the vendored table', () => {
+    // Reason: the proxy forwards any model a client names, so the ceiling must cover
+    // the most expensive thing the providers actually sell (o1-pro-class), not just
+    // the served list. Computed independently from the raw entries here.
+    const live = liveProxiedEntries();
+    expect(live.length).toBeGreaterThan(50); // sanity: the table is populated
+    const cap = (v: number | undefined) => (v && v <= 0.005 ? toMicro(v) : 0n);
+    for (const [key, e] of live) {
+      expect(cap(e.input_cost_per_token), key).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
+      expect(cap(e.input_cost_per_token_above_200k_tokens), key).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
+      expect(cap(e.output_cost_per_token), key).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
+      expect(cap(e.output_cost_per_token_above_200k_tokens), key).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
+      expect(cap(e.cache_read_input_token_cost), key).toBeLessThanOrEqual(CEILING_PRICING.cachedInputMicro);
+      expect(cap(e.cache_creation_input_token_cost), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
+      expect(cap(e.cache_creation_input_token_cost_above_1hr), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
+    }
+    // The pro-tier Responses models are live and drive the ceiling well above the floor.
+    expect(CEILING_PRICING.inputMicro).toBeGreaterThanOrEqual(150_000_000n);
+    expect(CEILING_PRICING.outputMicro).toBeGreaterThanOrEqual(600_000_000n);
+    // Every served model is (trivially) at or below the ceiling too.
     for (const [m, p] of Object.entries(PRICING)) {
       expect(p.inputMicro, m).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
       expect(p.outputMicro, m).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
-      expect(p.cachedInputMicro, m).toBeLessThanOrEqual(CEILING_PRICING.cachedInputMicro);
-      expect(p.cacheCreationMicro, m).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
-      if (p.inputMicroAbove200k) expect(p.inputMicroAbove200k, m).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
-      if (p.outputMicroAbove200k) expect(p.outputMicroAbove200k, m).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
     }
-    expect(CEILING_PRICING.inputMicro).toBeGreaterThanOrEqual(15_000_000n);
-    expect(CEILING_PRICING.outputMicro).toBeGreaterThanOrEqual(75_000_000n);
-    // No cache discount for unknown ids: cached reads >= the ceiling input rate's floor.
-    expect(CEILING_PRICING.cachedInputMicro).toBeGreaterThanOrEqual(15_000_000n);
+  });
+
+  it('buildCeilingPricing takes the max across ALL price fields, including above-200k and 1h-cache tiers', () => {
+    // Reason: synthetic entries make the max logic observable (in the real table one
+    // model dominates every field, so a mutant that ignores above-200k or 1h-cache
+    // fields would otherwise pass unnoticed).
+    const entries: LiteLLMEntry[] = [
+      { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6, cache_read_input_token_cost: 1e-7, cache_creation_input_token_cost: 1.25e-6 },
+      { input_cost_per_token: 5e-6, input_cost_per_token_above_200k_tokens: 9e-4, output_cost_per_token: 1e-5, output_cost_per_token_above_200k_tokens: 2e-3 },
+      { cache_read_input_token_cost_above_200k_tokens: 8e-4, cache_creation_input_token_cost_above_1hr: 3e-3 },
+    ];
+    const c = buildCeilingPricing(entries);
+    expect(c.inputMicro).toBe(900_000_000n); // above-200k input dominates
+    expect(c.outputMicro).toBe(2_000_000_000n); // above-200k output dominates
+    // cached read: max(field maxes, input ceiling) — no discount for unknown ids
+    expect(c.cachedInputMicro).toBe(900_000_000n);
+    // cache write: 1h tier (3e-3) dominates everything
+    expect(c.cacheCreationMicro).toBe(3_000_000_000n);
+  });
+
+  it('buildCeilingPricing ignores corrupt (mis-scaled) rows and never drops below the floor', () => {
+    // A 1e6x mis-scaled row (LiteLLM has shipped these) must not blow the ceiling up…
+    const corrupt: LiteLLMEntry[] = [{ input_cost_per_token: 3, output_cost_per_token: 15 }];
+    const c1 = buildCeilingPricing(corrupt);
+    expect(c1.inputMicro).toBe(30_000_000n); // floor
+    expect(c1.outputMicro).toBe(120_000_000n); // floor
+    // …and an empty table still yields the conservative-high floor, never $0.
+    const c0 = buildCeilingPricing([]);
+    expect(c0.inputMicro).toBe(30_000_000n);
+    expect(c0.cachedInputMicro).toBe(30_000_000n);
+    expect(c0.cacheCreationMicro).toBe(37_500_000n);
+  });
+
+  it('isLiveProxiedEntry admits only live chat/responses rows of proxied providers', () => {
+    const base: LiteLLMEntry = { input_cost_per_token: 1e-6, litellm_provider: 'openai', mode: 'chat' };
+    expect(isLiveProxiedEntry(base, '2026-09-02')).toBe(true);
+    expect(isLiveProxiedEntry({ ...base, mode: 'responses' }, '2026-09-02')).toBe(true);
+    expect(isLiveProxiedEntry({ ...base, litellm_provider: 'vertex_ai-language-models' }, '2026-09-02')).toBe(true);
+    expect(isLiveProxiedEntry({ ...base, litellm_provider: 'bedrock' }, '2026-09-02')).toBe(false);
+    expect(isLiveProxiedEntry({ ...base, mode: 'embedding' }, '2026-09-02')).toBe(false);
+    expect(isLiveProxiedEntry({ ...base, deprecation_date: '2026-09-01' }, '2026-09-02')).toBe(false);
+    expect(isLiveProxiedEntry({ ...base, deprecation_date: '2026-09-03' }, '2026-09-02')).toBe(true);
+  });
+
+  it('resolves OpenAI dated snapshot ids to the served bare id (never the ceiling)', () => {
+    // Reason: OpenAI echoes e.g. gpt-4o-2024-08-06 for a gpt-4o request. Without
+    // normalization every served OpenAI model would be billed at the ceiling.
+    for (const [dated, bare] of [
+      ['gpt-4o-2024-08-06', 'gpt-4o'],
+      ['gpt-4.1-2025-04-14', 'gpt-4.1'],
+      ['o4-mini-2025-04-16', 'o4-mini'],
+      ['gpt-5.4-2026-03-05', 'gpt-5.4'],
+    ] as const) {
+      expect(PRICING[bare], bare).toBeDefined();
+      expect(resolveServedPricing(dated), dated).toBe(PRICING[bare]);
+      expect(calculateCostMicroUsd(dated, 1000, 500, 0, 0)).toBe(calculateCostMicroUsd(bare, 1000, 500, 0, 0));
+    }
+    expect(resolveServedPricing('totally-unknown-2026-01-01')).toBeUndefined();
+    expect(resolveServedPricing('gpt-4o-not-a-date')).toBeUndefined();
   });
 
   it('keeps the ceiling float and micro encodings in agreement', () => {
