@@ -124,6 +124,17 @@ describe('budgetMiddleware — per-run admission', () => {
     expect(isRunAdmitted('user-42', 'run-hr')).toBe(true);
   });
 
+  it('does NOT admit a run that was refused with 402', async () => {
+    // Reason: admission must happen only AFTER the spend >= budget check passes. A
+    // mutant that admits before the check would leave a refused run admitted, so its
+    // next call would bypass the gate — the exact bug this test exists to catch.
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 5 });
+    const app = buildTestApp();
+    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-refused' } });
+    expect(res.status).toBe(402);
+    expect(isRunAdmitted('user-42', 'run-refused')).toBe(false);
+  });
+
   it('bypasses the budget query for an already-admitted in-flight run', async () => {
     // Pre-admit the run; even though spend >= budget, the in-flight call must pass.
     admitRun('user-42', 'run-1');

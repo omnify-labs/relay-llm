@@ -32,9 +32,9 @@ adminApp.put('/users/:user_id/budget', async (c) => {
   try {
     await setUserBudget(userId, body.budget, body.reset_spend ?? false);
     // Reason: drop any in-flight run admission so the new budget is enforced on the
-    // user's very next call. An admitted run skips the budget check for the rest of
-    // its window, so lowering a budget to halt spend would otherwise not bite for up
-    // to the full admission TTL.
+    // user's very next call. An admitted run skips the budget check until it ends (its
+    // window slides while it is alive), so lowering a budget to halt spend would
+    // otherwise not bite until the run finished.
     revokeUser(userId);
 
     console.log(

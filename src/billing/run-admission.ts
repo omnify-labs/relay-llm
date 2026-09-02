@@ -10,10 +10,17 @@
  *   - Primary: an explicit end signal (`endRun`) the extension sends when the agent run
  *     completes — the admission is dropped at once so the next run is gated immediately.
  *   - Backstop: a sliding IDLE window (ADMISSION_TTL_MS). Each admitted call refreshes it,
- *     so a run stays admitted as long as it keeps making calls, however long or costly;
- *     the window only lapses after the run goes quiet (e.g. a browser crash that never
- *     sent the end signal). It is NOT a hard cap from admission — an active run is never
- *     cut off by it.
+ *     and so does the extension's keepalive (`touchRun`) while a run is blocked on a
+ *     human, so a run stays admitted as long as it is alive, however long or costly; the
+ *     window only lapses after the run goes quiet (e.g. a browser crash that never sent
+ *     the end signal). It is NOT a hard cap from admission — an active run is never cut
+ *     off by it.
+ *
+ * TTL invariant: ADMISSION_TTL_MS must exceed the longest SILENT pause a live run can
+ * have — one where neither a relay call nor a keepalive arrives. Human waits are covered
+ * by the keepalive; the remaining silent pause is a single tool call (the extension's
+ * proxy-tool / REPL budget is 5 min) plus one streamed reply. The 30-min default gives
+ * ~6x margin. Never set it near 5 min in production: that re-gates runs mid-task.
  *
  * State is in-memory; a relay restart clears it (an in-flight run is then re-gated on its
  * next call, which is safe — under budget it re-admits, over budget it stops).
@@ -109,6 +116,29 @@ export function isRunAdmitted(userId: string, runId: string, now: number = Date.
  */
 export function revokeUser(userId: string): void {
   admitted.delete(userId);
+}
+
+/**
+ * Refresh an admitted run's idle window WITHOUT admitting anything — the keepalive.
+ *
+ * The extension sends this from its approval heartbeat while a run is blocked on a
+ * human (approval card, ask_user), which is the one pause the idle window cannot see
+ * and which is unbounded by design. It only slides an existing, unexpired entry; an
+ * unknown or lapsed run is left alone (returns false), so a keepalive can never bypass
+ * the budget gate — only `budgetMiddleware` admits.
+ *
+ * @param userId - The authenticated user (from the keepalive request's JWT).
+ * @param runId - The run to keep alive.
+ * @param now - Injectable clock for tests.
+ * @returns True if the run was admitted and its window was refreshed.
+ */
+export function touchRun(userId: string, runId: string, now: number = Date.now()): boolean {
+  const runs = admitted.get(userId);
+  if (!runs) return false;
+  const expiresAt = runs.get(runId);
+  if (expiresAt === undefined || now >= expiresAt) return false;
+  runs.set(runId, now + ADMISSION_TTL_MS);
+  return true;
 }
 
 /**

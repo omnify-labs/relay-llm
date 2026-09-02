@@ -101,8 +101,7 @@ never interrupted mid-flight when credit runs out. A run is identified by the
 
 Bounds on overshoot:
 
-- **Hard admission window** `RUN_ADMISSION_TTL_MS` (default 30 min): a run still active
-  at expiry is re-checked — under budget it re-admits, over budget it stops.
+- **Sliding idle window** `RUN_ADMISSION_TTL_MS` (default 30 min): refreshed on every admitted call and by the extension's keepalive while a run is blocked on a human, so an active run is never re-checked; it lapses only after a run goes quiet (lost end signal). The extension ends a run explicitly via `POST /v1/runs/:runId/end`. There is no per-run spend cap by product decision.
 - **Per-user concurrency cap** (`MAX_ADMITTED_RUNS_PER_USER`): beyond it, further runs
   are not admitted and keep per-call gating. `runId` is client-supplied, so this caps
   both worst-case overspend and pinned memory.
