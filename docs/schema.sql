@@ -112,3 +112,16 @@ END $$;
 -- cache_creation_tokens: tokens written to cache (Anthropic: billed at 1.25x)
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cached_input_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- Per-request billing idempotency (2026-09-02)
+-- usage_logs.request_id is the idempotency key: insertUsageLog does
+-- `ON CONFLICT (request_id) DO NOTHING RETURNING id` and spend is incremented ONLY
+-- when a row was actually inserted, so a retried write after a lost ack charges
+-- exactly once. Verified on prod before adding: 416,842 rows, 0 NULL and 0 duplicate
+-- request_ids. CONCURRENTLY builds without locking writes but cannot run inside a
+-- transaction block — run this statement on its own (not wrapped in BEGIN/COMMIT).
+-- DEPLOY ORDER: create this index BEFORE deploying the code that uses ON CONFLICT
+-- (request_id). Without it every insert errors ("no unique or exclusion constraint
+-- matching the ON CONFLICT specification") and, since spend is charged only after a
+-- successful insert, NO request would be billed until the index exists.
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);

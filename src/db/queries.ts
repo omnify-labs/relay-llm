@@ -48,13 +48,18 @@ export async function getUserBudget(userId: string): Promise<UserBudget | null> 
 }
 
 /**
- * Insert a usage log record.
+ * Insert a usage log record — the per-request idempotency record.
+ *
+ * `request_id` is unique (usage_logs_request_id_key), so a replayed insert for the same
+ * request conflicts and inserts nothing. The caller increments spend ONLY when this
+ * returns true, which is what makes a retried write after a lost ack charge exactly once.
  *
  * @param record - Usage data to log
+ * @returns True if a new row was inserted; false if this request_id was already logged.
  */
-export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
+export async function insertUsageLog(record: UsageLogInsert): Promise<boolean> {
   const sql = getDb();
-  await sql`
+  const rows = await sql`
     INSERT INTO usage_logs (
       user_id, provider, model,
       input_tokens, output_tokens, total_tokens,
@@ -66,7 +71,10 @@ export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
       ${record.cachedInputTokens}, ${record.cacheCreationTokens},
       ${record.costMicroUsd}::numeric / 1000000, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
     )
+    ON CONFLICT (request_id) DO NOTHING
+    RETURNING id
   `;
+  return rows.length > 0;
 }
 
 /**

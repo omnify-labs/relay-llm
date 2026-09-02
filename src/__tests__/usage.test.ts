@@ -44,16 +44,15 @@ beforeEach(() => {
   mockIncrementUserSpend.mockReset();
   mockCalc.mockClear();
   mockCalc.mockReturnValue(5000n);
-  // Default: both succeed
-  mockInsertUsageLog.mockResolvedValue(undefined);
+  // Default: the row is freshly inserted (true) and the increment succeeds.
+  mockInsertUsageLog.mockResolvedValue(true);
   mockIncrementUserSpend.mockResolvedValue(undefined);
 });
 
 describe('logUsage', () => {
-  it('calls insertUsageLog and incrementUserSpend on success', async () => {
+  it('inserts the audit row, then increments spend', async () => {
     await logUsage(baseRecord);
 
-    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-abc-123', 5000);
     expect(mockInsertUsageLog).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'user-abc-123',
@@ -62,6 +61,11 @@ describe('logUsage', () => {
         totalTokens: 150,
         costMicroUsd: 5000,
       }),
+    );
+    expect(mockIncrementUserSpend).toHaveBeenCalledWith('user-abc-123', 5000);
+    // Reason: the row is the idempotency record, so it must land BEFORE the charge.
+    expect(mockInsertUsageLog.mock.invocationCallOrder[0]).toBeLessThan(
+      mockIncrementUserSpend.mock.invocationCallOrder[0],
     );
   });
 
@@ -91,9 +95,7 @@ describe('logUsage', () => {
       cachedInputTokens: -5,
       cacheCreationTokens: NaN,
     });
-    // cost computed from sanitized ints: 150 in, 0 out, 0 cached, 0 cacheCreation
     expect(mockCalc).toHaveBeenCalledWith('gpt-4o', 150, 0, 0, 0);
-    // audit row carries only integers, total = 150 + 0
     expect(mockInsertUsageLog).toHaveBeenCalledWith(
       expect.objectContaining({
         inputTokens: 150,
@@ -103,27 +105,37 @@ describe('logUsage', () => {
         totalTokens: 150,
       }),
     );
-    // and the request is still both charged and logged (no throw skipped either leg)
     expect(mockIncrementUserSpend).toHaveBeenCalledTimes(1);
     expect(mockInsertUsageLog).toHaveBeenCalledTimes(1);
   });
 
-  it('retries insertUsageLog independently without duplicating incrementUserSpend', async () => {
-    // insertUsageLog fails twice then succeeds; incrementUserSpend succeeds first try
-    mockInsertUsageLog
-      .mockRejectedValueOnce(new Error('conn reset'))
-      .mockRejectedValueOnce(new Error('conn reset'))
-      .mockResolvedValueOnce(undefined);
+  it('skips the spend increment on a request_id replay (row already logged)', async () => {
+    // Reason: THE double-charge fix. A retried write after a lost ack conflicts on
+    // request_id (insert returns false) — the request was already charged, so no
+    // second increment.
+    mockInsertUsageLog.mockResolvedValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     await logUsage(baseRecord);
 
-    // incrementUserSpend should only be called once (no retry needed)
-    expect(mockIncrementUserSpend).toHaveBeenCalledTimes(1);
-    // insertUsageLog retried 3 times total
-    expect(mockInsertUsageLog).toHaveBeenCalledTimes(3);
+    expect(mockIncrementUserSpend).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('replay ignored'));
+    warn.mockRestore();
   });
 
-  it('retries incrementUserSpend independently without duplicating insertUsageLog', async () => {
+  it('retries the insert and charges exactly once after it finally succeeds', async () => {
+    mockInsertUsageLog
+      .mockRejectedValueOnce(new Error('conn reset'))
+      .mockRejectedValueOnce(new Error('conn reset'))
+      .mockResolvedValueOnce(true);
+
+    await logUsage(baseRecord);
+
+    expect(mockInsertUsageLog).toHaveBeenCalledTimes(3);
+    expect(mockIncrementUserSpend).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries the increment without re-inserting the row', async () => {
     mockIncrementUserSpend
       .mockRejectedValueOnce(new Error('timeout'))
       .mockResolvedValueOnce(undefined);
@@ -134,85 +146,63 @@ describe('logUsage', () => {
     expect(mockInsertUsageLog).toHaveBeenCalledTimes(1);
   });
 
-  it('handles insertUsageLog failure without affecting incrementUserSpend', async () => {
-    // insertUsageLog fails all 3 attempts
+  it('does not charge when the audit row cannot be inserted (spend and audit stay consistent)', async () => {
+    // Reason: deliberate semantics change from the old "independent legs" design —
+    // without an audit row there is no idempotency record, so charging would risk a
+    // double-charge on a later retry and would leave spend unexplained by usage_logs.
     mockInsertUsageLog.mockRejectedValue(new Error('disk full'));
-
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await logUsage(baseRecord);
 
-    // incrementUserSpend still succeeds
-    expect(mockIncrementUserSpend).toHaveBeenCalledTimes(1);
+    expect(mockInsertUsageLog).toHaveBeenCalledTimes(3);
+    expect(mockIncrementUserSpend).not.toHaveBeenCalled();
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to insert usage log'),
+      expect.stringContaining('Failed to insert usage log after 3 attempts (not charged)'),
     );
-
     consoleSpy.mockRestore();
   });
 
-  it('handles incrementUserSpend failure without affecting insertUsageLog', async () => {
+  it('logs an increment failure after the row was inserted, without re-inserting', async () => {
     mockIncrementUserSpend.mockRejectedValue(new Error('conn refused'));
-
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await logUsage(baseRecord);
 
-    // insertUsageLog still succeeds
     expect(mockInsertUsageLog).toHaveBeenCalledTimes(1);
+    expect(mockIncrementUserSpend).toHaveBeenCalledTimes(3);
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to increment spend'),
+      expect.stringContaining('Failed to increment spend after 3 attempts (row logged)'),
     );
-
-    consoleSpy.mockRestore();
-  });
-
-  it('handles both operations failing', async () => {
-    mockInsertUsageLog.mockRejectedValue(new Error('db down'));
-    mockIncrementUserSpend.mockRejectedValue(new Error('db down'));
-
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-    await logUsage(baseRecord);
-
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to increment spend'),
-    );
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to insert usage log'),
-    );
-
     consoleSpy.mockRestore();
   });
 
   it('normalizes non-Error rejections into readable log messages', async () => {
-    // Reason: covers retryAsync's non-Error branch — a driver can reject with a
-    // bare string/object; retryAsync wraps it in `new Error(String(...))` so the
-    // log path never crashes on `.message` and still carries the reason text.
-    mockIncrementUserSpend.mockRejectedValue('string failure');
-    mockInsertUsageLog.mockRejectedValue({ code: 'ECONNRESET' });
-
+    // Reason: covers retryAsync's non-Error branch — a driver can reject with a bare
+    // string/object; retryAsync wraps it in `new Error(String(...))` so the log path
+    // never crashes on `.message` and still carries the reason text.
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
+    mockInsertUsageLog.mockRejectedValue({ code: 'ECONNRESET' });
     await logUsage(baseRecord);
-
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to increment spend after 3 attempts: string failure'),
-    );
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to insert usage log after 3 attempts: [object Object]'),
+      expect.stringContaining('Failed to insert usage log after 3 attempts (not charged): user=user-abc request=req-001: [object Object]'),
     );
 
+    mockInsertUsageLog.mockResolvedValue(true);
+    mockIncrementUserSpend.mockRejectedValue('string failure');
+    await logUsage(baseRecord);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to increment spend after 3 attempts (row logged): user=user-abc request=req-001: string failure'),
+    );
     consoleSpy.mockRestore();
   });
 
-  it('does not throw even when both operations fail (fail-open)', async () => {
+  it('does not throw even when the DB is down (fail-open)', async () => {
     mockInsertUsageLog.mockRejectedValue(new Error('db down'));
     mockIncrementUserSpend.mockRejectedValue(new Error('db down'));
-
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    // Should not throw — usage logging is fail-open
     await expect(logUsage(baseRecord)).resolves.toBeUndefined();
 
     vi.restoreAllMocks();

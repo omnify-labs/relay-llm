@@ -195,13 +195,14 @@ describe('insertUsageLog', () => {
     // `values.toContain(...)` cannot see a swap that writes, say, output_tokens into
     // the input_tokens column. The values array must line up 1:1 with the column list
     // below, with cost_usd derived from the same integer µ$ via exact NUMERIC division.
-    mockSqlFn.mockResolvedValueOnce([]);
+    mockSqlFn.mockResolvedValueOnce([{ id: 'row-1' }]);
     await insertUsageLog(record);
     const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
     expect(sql).toBe(
       'INSERT INTO usage_logs ( user_id, provider, model, input_tokens, output_tokens, total_tokens, ' +
         'cached_input_tokens, cache_creation_tokens, cost_usd, request_id, latency_ms, status_code ) VALUES ( ' +
-        '$0, $1, $2, $3, $4, $5, $6, $7, $8::numeric / 1000000, $9, $10, $11 )',
+        '$0, $1, $2, $3, $4, $5, $6, $7, $8::numeric / 1000000, $9, $10, $11 ) ' +
+        'ON CONFLICT (request_id) DO NOTHING RETURNING id',
     );
     expect(values).toEqual([
       record.userId, // user_id
@@ -217,6 +218,15 @@ describe('insertUsageLog', () => {
       record.latencyMs, // latency_ms
       record.statusCode, // status_code
     ]);
+  });
+
+  it('returns true when a row was inserted and false on a request_id replay', async () => {
+    // Reason: the boolean is the whole idempotency contract — the caller charges spend
+    // only on true. A conflict (replay after a lost ack) yields no RETURNING row.
+    mockSqlFn.mockResolvedValueOnce([{ id: 'row-1' }]);
+    expect(await insertUsageLog(record)).toBe(true);
+    mockSqlFn.mockResolvedValueOnce([]);
+    expect(await insertUsageLog(record)).toBe(false);
   });
 
   it('propagates a DB error', async () => {

@@ -23,11 +23,17 @@ export interface UsageRecord {
 
 /**
  * Log usage for a completed request.
- * Calculates cost and writes to both usage_logs and user_budgets (spend increment).
+ * Writes the usage_logs row, then increments user_budgets.spend — and only then.
  *
- * Spend increment and usage log are written independently with separate retries.
- * Reason: They must not share a retry loop — if incrementUserSpend succeeds but
- * insertUsageLog fails, retrying both would double-charge the user.
+ * The usage_logs row is the per-request idempotency record: its request_id is unique,
+ * so a retried insert after a lost ack conflicts and inserts nothing, and the spend
+ * increment is skipped. That is what makes billing exactly-once per request. (The
+ * previous design ran both writes independently with separate retries, which could
+ * not tell a lost ack from a failure and double-charged on retry.)
+ *
+ * Fail-open: nothing here throws. A request whose row cannot be inserted is not
+ * charged either — spend and audit stay consistent, and the gap is reconcilable from
+ * usage_logs rather than a silent overcharge.
  */
 export async function logUsage(record: UsageRecord): Promise<void> {
   // Reason: sanitize the provider counts ONCE, here, and use the sanitized values for
@@ -47,11 +53,11 @@ export async function logUsage(record: UsageRecord): Promise<void> {
     calculateCostMicroUsd(record.model, inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens),
   );
   const totalTokens = inputTokens + outputTokens;
+  const who = `user=${record.userId.slice(0, 8)} request=${record.requestId}`;
 
-  // Run both independently so a failure in one doesn't block or duplicate the other
-  const [spendResult, logResult] = await Promise.allSettled([
-    retryAsync(() => incrementUserSpend(record.userId, costMicroUsd), 3),
-    retryAsync(
+  let inserted: boolean;
+  try {
+    inserted = await retryAsync(
       () =>
         insertUsageLog({
           ...record,
@@ -63,24 +69,32 @@ export async function logUsage(record: UsageRecord): Promise<void> {
           costMicroUsd,
         }),
       3,
-    ),
-  ]);
-
-  if (spendResult.status === 'fulfilled' && logResult.status === 'fulfilled') {
-    console.log(
-      `[Relay] Usage logged: user=${record.userId.slice(0, 8)} provider=${record.provider} model=${record.model} ` +
-        `in=${inputTokens} cached=${cachedInputTokens} out=${outputTokens} cost=$${(costMicroUsd / 1e6).toFixed(6)} latency=${record.latencyMs}ms`,
     );
-  } else {
-    if (spendResult.status === 'rejected') {
-      const msg = spendResult.reason instanceof Error ? spendResult.reason.message : 'Unknown error';
-      console.error(`[Relay] Failed to increment spend after 3 attempts: ${msg}`);
-    }
-    if (logResult.status === 'rejected') {
-      const msg = logResult.reason instanceof Error ? logResult.reason.message : 'Unknown error';
-      console.error(`[Relay] Failed to insert usage log after 3 attempts: ${msg}`);
-    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[Relay] Failed to insert usage log after 3 attempts (not charged): ${who}: ${msg}`);
+    return;
   }
+
+  if (!inserted) {
+    // Reason: a replay — this request_id was already logged (and charged) by an
+    // earlier attempt whose ack we lost. Charging again is the double-charge bug.
+    console.warn(`[Relay] Usage log replay ignored (already charged): ${who}`);
+    return;
+  }
+
+  try {
+    await retryAsync(() => incrementUserSpend(record.userId, costMicroUsd), 3);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`[Relay] Failed to increment spend after 3 attempts (row logged): ${who}: ${msg}`);
+    return;
+  }
+
+  console.log(
+    `[Relay] Usage logged: user=${record.userId.slice(0, 8)} provider=${record.provider} model=${record.model} ` +
+      `in=${inputTokens} cached=${cachedInputTokens} out=${outputTokens} cost=$${(costMicroUsd / 1e6).toFixed(6)} latency=${record.latencyMs}ms`,
+  );
 }
 
 /**
@@ -89,12 +103,11 @@ export async function logUsage(record: UsageRecord): Promise<void> {
  * @param fn - Async function to retry
  * @param maxAttempts - Maximum number of attempts
  */
-async function retryAsync(fn: () => Promise<void>, maxAttempts: number): Promise<void> {
+async function retryAsync<T>(fn: () => Promise<T>, maxAttempts: number): Promise<T> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      await fn();
-      return;
+      return await fn();
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       if (attempt < maxAttempts - 1) {
