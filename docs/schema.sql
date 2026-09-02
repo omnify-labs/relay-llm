@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd NUMERIC(10, 6) NOT NULL DEFAULT 0,
-  request_id TEXT,
+  request_id TEXT NOT NULL,
   latency_ms INTEGER,
   status_code INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
@@ -114,14 +114,20 @@ ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cached_input_tokens INTEGER NOT 
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
 
 -- Per-request billing idempotency (2026-09-02)
--- usage_logs.request_id is the idempotency key: insertUsageLog does
--- `ON CONFLICT (request_id) DO NOTHING RETURNING id` and spend is incremented ONLY
--- when a row was actually inserted, so a retried write after a lost ack charges
--- exactly once. Verified on prod before adding: 416,842 rows, 0 NULL and 0 duplicate
--- request_ids. CONCURRENTLY builds without locking writes but cannot run inside a
--- transaction block — run this statement on its own (not wrapped in BEGIN/COMMIT).
--- DEPLOY ORDER: create this index BEFORE deploying the code that uses ON CONFLICT
--- (request_id). Without it every insert errors ("no unique or exclusion constraint
--- matching the ON CONFLICT specification") and, since spend is charged only after a
--- successful insert, NO request would be billed until the index exists.
+-- usage_logs.request_id is the idempotency key: recordUsage() runs the INSERT
+-- (`ON CONFLICT (request_id) DO NOTHING RETURNING id`) and the spend UPDATE in ONE
+-- statement, with the UPDATE gated on the INSERT — so a retried write after a lost
+-- ack conflicts, charges nothing, and cannot half-apply. Verified on prod before
+-- adding: 416,842 rows, 0 NULL and 0 duplicate request_ids.
+--
+-- RUNBOOK — order matters, and merging to main IS a prod deploy (deploy.yml):
+--   1. Run BOTH statements below on prod BEFORE merging the code that uses them.
+--      CONCURRENTLY cannot run inside a transaction block — run it standalone.
+--   2. Verify the index is VALID. A cancelled/failed CONCURRENTLY build leaves an
+--      INVALID index; `IF NOT EXISTS` then silently skips, and Postgres refuses an
+--      invalid index as an ON CONFLICT arbiter — every insert would error and,
+--      since the charge is gated on the insert, NO request would be billed.
+--        SELECT indisvalid FROM pg_index WHERE indexrelid = 'usage_logs_request_id_key'::regclass;
+--      If false: DROP INDEX usage_logs_request_id_key; and re-run step 1.
+ALTER TABLE usage_logs ALTER COLUMN request_id SET NOT NULL;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);

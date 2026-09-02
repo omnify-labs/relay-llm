@@ -4,7 +4,7 @@
  * Runs asynchronously — never blocks the response stream.
  */
 
-import { insertUsageLog, incrementUserSpend } from '../db/queries.js';
+import { recordUsage } from '../db/queries.js';
 import { calculateCostMicroUsd, safeTokenCount } from './pricing.js';
 import type { ProviderName } from '../proxy/providers.js';
 
@@ -22,25 +22,19 @@ export interface UsageRecord {
 }
 
 /**
- * Log usage for a completed request.
- * Writes the usage_logs row, then increments user_budgets.spend — and only then.
+ * Log usage for a completed request and charge it — one atomic write, exactly once.
  *
- * The usage_logs row is the per-request idempotency record: its request_id is unique,
- * so a retried insert after a lost ack conflicts and inserts nothing, and the spend
- * increment is skipped. That is what makes billing exactly-once per request. (The
- * previous design ran both writes independently with separate retries, which could
- * not tell a lost ack from a failure and double-charged on retry.)
+ * `recordUsage` inserts the usage_logs row (unique on request_id) and increments spend
+ * in the same statement, with the increment gated on the insert. A retry after a lost
+ * ack therefore conflicts and charges nothing ('replay'); a failure rolls back both.
  *
- * Fail-open: nothing here throws. A request whose row cannot be inserted is not
- * charged either — spend and audit stay consistent, and the gap is reconcilable from
- * usage_logs rather than a silent overcharge.
+ * Fail-open: nothing here throws. If the write cannot be made after 3 attempts the
+ * request is neither logged nor charged; the only trace is the error log line.
  */
 export async function logUsage(record: UsageRecord): Promise<void> {
   // Reason: sanitize the provider counts ONCE, here, and use the sanitized values for
   // BOTH the cost math and the audit row. usage_logs' token columns are INTEGER, so a
-  // fractional/non-finite/string count would otherwise let the spend increment succeed
-  // (it uses the cost, which sanitizes internally) while the INSERT fails — charging
-  // the user but losing the audit row.
+  // fractional/non-finite/string count would otherwise make the write fail.
   const inputTokens = safeTokenCount(record.inputTokens);
   const outputTokens = safeTokenCount(record.outputTokens);
   const cachedInputTokens = safeTokenCount(record.cachedInputTokens);
@@ -55,11 +49,11 @@ export async function logUsage(record: UsageRecord): Promise<void> {
   const totalTokens = inputTokens + outputTokens;
   const who = `user=${record.userId.slice(0, 8)} request=${record.requestId}`;
 
-  let inserted: boolean;
+  let outcome;
   try {
-    inserted = await retryAsync(
+    outcome = await retryAsync(
       () =>
-        insertUsageLog({
+        recordUsage({
           ...record,
           inputTokens,
           outputTokens,
@@ -72,22 +66,14 @@ export async function logUsage(record: UsageRecord): Promise<void> {
     );
   } catch (error) {
     const msg = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`[Relay] Failed to insert usage log after 3 attempts (not charged): ${who}: ${msg}`);
+    console.error(`[Relay] Failed to record usage after 3 attempts (not logged, not charged): ${who}: ${msg}`);
     return;
   }
 
-  if (!inserted) {
-    // Reason: a replay — this request_id was already logged (and charged) by an
-    // earlier attempt whose ack we lost. Charging again is the double-charge bug.
-    console.warn(`[Relay] Usage log replay ignored (already charged): ${who}`);
-    return;
-  }
-
-  try {
-    await retryAsync(() => incrementUserSpend(record.userId, costMicroUsd), 3);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : 'Unknown error';
-    console.error(`[Relay] Failed to increment spend after 3 attempts (row logged): ${who}: ${msg}`);
+  if (outcome === 'replay') {
+    // Reason: the earlier attempt's single statement committed row + charge together,
+    // so this request is already charged. Charging again is the double-charge bug.
+    console.warn(`[Relay] Usage replay ignored (already recorded and charged): ${who}`);
     return;
   }
 
