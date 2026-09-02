@@ -3,6 +3,7 @@ import {
   isRunAdmitted,
   admitRun,
   endRun,
+  touchRun,
   revokeUser,
   pruneAllUsers,
   __resetAdmissionsForTests,
@@ -76,6 +77,44 @@ describe('run-admission — sliding idle window (a run is never cut off while ac
     expect(admissionCountForTests()).toBe(1);
     expect(isRunAdmitted('idle-user', 'run-a', TTL + 1)).toBe(false);
     expect(admissionCountForTests()).toBe(0);
+  });
+});
+
+describe('run-admission — admitRun on an already-tracked run refreshes it', () => {
+  it('re-admitting a live run slides its window instead of refusing it', () => {
+    // Reason: budgetMiddleware re-admits a run whose window lapsed and re-checked under
+    // budget; and the cap exemption promises a tracked run is never refused. A mutant
+    // that refuses re-admission (`if (runs.has(runId)) return`) must fail here.
+    admitRun('u1', 'run-a', 0); // expiry TTL
+    admitRun('u1', 'run-a', TTL - 1); // refresh -> (TTL-1)+TTL
+    expect(isRunAdmitted('u1', 'run-a', TTL + 1)).toBe(true);
+    expect(admissionCountForTests()).toBe(1);
+  });
+});
+
+describe('run-admission — touchRun (keepalive)', () => {
+  it('slides the idle window of an admitted run', () => {
+    admitRun('u1', 'run-a', 0);
+    expect(touchRun('u1', 'run-a', TTL - 1)).toBe(true); // -> (TTL-1)+TTL
+    expect(isRunAdmitted('u1', 'run-a', 2 * TTL - 2)).toBe(true);
+  });
+
+  it('never admits an unknown run', () => {
+    expect(touchRun('u1', 'ghost', 0)).toBe(false);
+    expect(isRunAdmitted('u1', 'ghost', 0)).toBe(false);
+    expect(admissionCountForTests()).toBe(0);
+  });
+
+  it('does not resurrect a lapsed run', () => {
+    admitRun('u1', 'run-a', 0);
+    expect(touchRun('u1', 'run-a', TTL)).toBe(false); // already lapsed
+    expect(isRunAdmitted('u1', 'run-a', TTL)).toBe(false);
+  });
+
+  it('is scoped per user', () => {
+    admitRun('u2', 'run-shared', 0);
+    expect(touchRun('u1', 'run-shared', 0)).toBe(false);
+    expect(isRunAdmitted('u2', 'run-shared', TTL - 1)).toBe(true);
   });
 });
 

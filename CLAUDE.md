@@ -19,8 +19,9 @@ This repository hosts **Relay LLM** — a thin, transparent LLM proxy that forwa
 ### Fail-Closed on Budget, Fail-Open on Logging
 - If the budget check DB query fails → **reject the request** (prevent runaway spend)
 - If usage logging fails → **request still succeeds** (log async, don't block)
-- Never sacrifice billing safety for availability. "Billing safety" means **bounded,
-  accounted spend** — not a hard per-call ceiling.
+- Never sacrifice billing safety for availability. "Billing safety" means **fully
+  accounted spend with the gate enforced at run boundaries** — not a hard per-call
+  ceiling, and (by product decision, below) not a per-run amount cap either.
 
 ### Budget is enforced per run, not per call
 - Budget is gated **once, at a run's first call** (identified by `X-Dassi-Run-Id`).

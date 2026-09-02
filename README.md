@@ -206,10 +206,16 @@ A run stays admitted until it ends. Two reclamation paths:
 - **End signal (primary).** The extension calls `POST /v1/runs/:runId/end` when the
   agent run completes, dropping that run's admission at once so the user's next run is
   gated immediately. Scoped to the caller's own `userId`; idempotent.
+- **Keepalive.** While a run is blocked on a human (approval card, `ask_user`) it makes
+  no LLM calls, so the extension's approval heartbeat posts `POST /v1/runs/:runId/keepalive`
+  (every 60 s) to slide the window. It only refreshes an existing admission — it never
+  admits — so it cannot bypass the gate.
 - **Idle window (backstop).** `RUN_ADMISSION_TTL_MS` (default 30 min) is a *sliding*
-  window refreshed on every admitted call — so an active run is never cut off, however
-  long or costly. It only lapses after the run goes quiet (e.g. a browser crash that
-  never sent the end signal), reclaiming the entry.
+  window refreshed on every admitted call and every keepalive — so a live run is never
+  cut off, however long or costly. It lapses only after a run goes quiet (e.g. a browser
+  crash that never sent the end signal). **Invariant:** it must exceed the longest
+  *silent* pause of a live run — one tool call (5-min proxy-tool/REPL budget) plus a
+  streamed reply. Never run it near 5 min in production: that re-gates runs mid-task.
 
 Other bounds:
 

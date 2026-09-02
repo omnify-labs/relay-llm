@@ -3,7 +3,7 @@
  * Thin, transparent LLM proxy with zero format translation.
  */
 
-import { Hono, type Context } from 'hono';
+import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { serve } from '@hono/node-server';
@@ -12,7 +12,8 @@ import { authMiddleware } from './auth/jwt.js';
 import { adminAuthMiddleware } from './admin/middleware.js';
 import { adminApp } from './admin/handler.js';
 import { budgetMiddleware } from './billing/budget.js';
-import { pruneAllUsers, endRun } from './billing/run-admission.js';
+import { pruneAllUsers } from './billing/run-admission.js';
+import { runRoutes } from './billing/run-routes.js';
 import { loadEnv } from './config/env.js';
 
 const env = loadEnv();
@@ -33,16 +34,9 @@ adminRoutes.use('*', adminAuthMiddleware);
 adminRoutes.route('/', adminApp);
 app.route('/admin', adminRoutes);
 
-// Run lifecycle — the extension calls this when an agent run ends, so the run's
-// admission is dropped at once and the user's NEXT run is gated. runId is scoped to the
-// caller's own userId. Idempotent: ending an unknown/already-ended run still returns 200.
-app.post('/v1/runs/:runId/end', authMiddleware, (c: Context) => {
-  const userId = c.get('userId') as string;
-  const runId = c.req.param('runId');
-  if (!runId) return c.json({ error: 'Missing runId' }, 400);
-  endRun(userId, runId);
-  return c.json({ ended: true });
-});
+// Run lifecycle (end / keepalive) — JWT auth; handlers live in billing/run-routes.ts.
+app.use('/v1/runs/*', authMiddleware);
+app.route('/', runRoutes);
 
 // LLM proxy routes — JWT auth + budget check + passthrough
 app.all('/v1/openai/*', authMiddleware, budgetMiddleware, proxyHandler('openai'));
