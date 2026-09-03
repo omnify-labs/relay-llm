@@ -147,7 +147,7 @@ describe('recordUsage (atomic insert + charge)', () => {
     // text: ON CONFLICT (request_id) DO NOTHING, the UPDATE gated on EXISTS(ins), the
     // never-round-up trunc(…, 6), the row-scoped WHERE user_id, and the positional
     // binding of every value (cost appears twice: the row and the charge).
-    mockSqlFn.mockResolvedValueOnce([{ inserted: '1' }]);
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '1', charged: '1' }]);
     await recordUsage(record);
     const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
     expect(sql).toBe(
@@ -157,7 +157,7 @@ describe('recordUsage (atomic insert + charge)', () => {
         'ON CONFLICT (request_id) DO NOTHING RETURNING id ), ' +
         'charged AS ( UPDATE user_budgets SET spend = spend + trunc($12::numeric / 1000000, 6), updated_at = NOW() ' +
         'WHERE user_id = $13 AND EXISTS (SELECT 1 FROM ins) RETURNING user_id ) ' +
-        'SELECT (SELECT count(*) FROM ins) AS inserted',
+        'SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged',
     );
     expect(values).toEqual([
       record.userId, record.provider, record.model,
@@ -168,15 +168,24 @@ describe('recordUsage (atomic insert + charge)', () => {
     ]);
   });
 
-  it("returns 'charged' when the row was inserted and 'replay' on a request_id conflict", async () => {
-    // Reason: the outcome is the whole contract for the caller — 'replay' means the
-    // earlier attempt's single statement already committed row + charge together.
-    mockSqlFn.mockResolvedValueOnce([{ inserted: '1' }]);
+  it("returns 'charged' only when BOTH the row was inserted and a budget row was debited", async () => {
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '1', charged: '1' }]);
     expect(await recordUsage(record)).toBe('charged');
-    mockSqlFn.mockResolvedValueOnce([{ inserted: '0' }]);
+  });
+
+  it("returns 'replay' on a request_id conflict (already recorded and charged)", async () => {
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '0', charged: '0' }]);
     expect(await recordUsage(record)).toBe('replay');
+  });
+
+  it("returns 'uncharged' when the row was inserted but no user_budgets row exists to debit", async () => {
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '1', charged: '0' }]);
+    expect(await recordUsage(record)).toBe('uncharged');
+  });
+
+  it('throws on an empty result set instead of reporting a silent replay', async () => {
     mockSqlFn.mockResolvedValueOnce([]);
-    expect(await recordUsage(record)).toBe('replay');
+    await expect(recordUsage(record)).rejects.toThrow('no rows');
   });
 
   it('propagates a DB error (the caller retries the whole atomic write)', async () => {

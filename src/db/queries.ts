@@ -47,8 +47,12 @@ export async function getUserBudget(userId: string): Promise<UserBudget | null> 
   };
 }
 
-/** Outcome of recordUsage: the request was charged now, or it had already been. */
-export type RecordUsageOutcome = 'charged' | 'replay';
+/**
+ * Outcome of recordUsage: the request was charged now; it had already been recorded
+ * (and charged) earlier; or it was recorded but the user has no user_budgets row to
+ * charge — the row is kept so the request is never billed later either.
+ */
+export type RecordUsageOutcome = 'charged' | 'replay' | 'uncharged';
 
 /**
  * Record a request's usage AND charge it, atomically, exactly once.
@@ -65,7 +69,8 @@ export type RecordUsageOutcome = 'charged' | 'replay';
  *
  * @param record - Usage data to log; costMicroUsd is the integer micro-USD charge.
  * @returns 'charged' when this call inserted the row and charged spend; 'replay' when
- *   the request_id was already recorded (and therefore already charged).
+ *   the request_id was already recorded (and therefore already charged); 'uncharged'
+ *   when the row was inserted but no user_budgets row exists to charge.
  */
 export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOutcome> {
   const sql = getDb();
@@ -93,9 +98,14 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
       WHERE user_id = ${record.userId} AND EXISTS (SELECT 1 FROM ins)
       RETURNING user_id
     )
-    SELECT (SELECT count(*) FROM ins) AS inserted
+    SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged
   `;
-  return Number(rows[0]?.inserted ?? 0) > 0 ? 'charged' : 'replay';
+  const row = rows[0];
+  // The outer SELECT always yields exactly one row; anything else is a driver fault
+  // and must surface as a failure (retried, then logged), never as a silent 'replay'.
+  if (!row) throw new Error('recordUsage returned no rows');
+  if (Number(row.inserted) === 0) return 'replay';
+  return Number(row.charged) > 0 ? 'charged' : 'uncharged';
 }
 
 /**

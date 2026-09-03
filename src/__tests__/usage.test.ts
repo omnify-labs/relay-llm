@@ -88,6 +88,15 @@ describe('logUsage', () => {
     warn.mockRestore();
   });
 
+  it("logs an error and writes nothing else when the row was recorded but no budget row existed ('uncharged')", async () => {
+    mockRecordUsage.mockResolvedValue('uncharged');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(logUsage(baseRecord)).resolves.toBeUndefined();
+    expect(mockRecordUsage).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('NOT charged'));
+    error.mockRestore();
+  });
+
   it('retries the whole atomic write and stops after the first success', async () => {
     mockRecordUsage
       .mockRejectedValueOnce(new Error('conn reset'))

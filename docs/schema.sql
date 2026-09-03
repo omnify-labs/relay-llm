@@ -129,5 +129,13 @@ ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NO
 --      since the charge is gated on the insert, NO request would be billed.
 --        SELECT indisvalid FROM pg_index WHERE indexrelid = 'usage_logs_request_id_key'::regclass;
 --      If false: DROP INDEX usage_logs_request_id_key; and re-run step 1.
+--      A build can also fail because the OLD writer (still running during the
+--      build) inserted a duplicate request_id after a lost ack — the very bug this
+--      index closes. Then: SELECT request_id FROM usage_logs GROUP BY 1 HAVING count(*) > 1;
+--      delete the later row of each pair, reconcile spend, and re-run step 1.
+--   3. SET NOT NULL takes ACCESS EXCLUSIVE and scans the table; behind a long
+--      analytics query it would queue every relay INSERT behind it (which then fail
+--      open = served free). Bound the wait: SET lock_timeout = '2s'; and retry.
+-- Applied to the production Supabase on 2026-09-03 (index VALID, 430,395 rows).
 ALTER TABLE usage_logs ALTER COLUMN request_id SET NOT NULL;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);

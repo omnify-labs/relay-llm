@@ -76,6 +76,13 @@ export async function logUsage(record: UsageRecord): Promise<void> {
     console.warn(`[Relay] Usage replay ignored (already recorded and charged): ${who}`);
     return;
   }
+  if (outcome === 'uncharged') {
+    // Reason: the row exists (so a retry cannot charge it later either) but there was
+    // no user_budgets row to debit — e.g. an admitted run whose budget was deleted
+    // mid-flight. Loud, because SUM(cost_usd) and spend no longer reconcile.
+    console.error(`[Relay] Usage recorded but NOT charged (no user_budgets row): ${who}`);
+    return;
+  }
 
   console.log(
     `[Relay] Usage logged: user=${record.userId.slice(0, 8)} provider=${record.provider} model=${record.model} ` +
