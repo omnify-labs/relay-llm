@@ -48,55 +48,64 @@ export async function getUserBudget(userId: string): Promise<UserBudget | null> 
 }
 
 /**
- * Insert a usage log record.
- *
- * @param record - Usage data to log
+ * Outcome of recordUsage: the request was charged now; it had already been recorded
+ * (and charged) earlier; or it was recorded but the user has no user_budgets row to
+ * charge — the row is kept so the request is never billed later either.
  */
-export async function insertUsageLog(record: UsageLogInsert): Promise<void> {
-  const sql = getDb();
-  await sql`
-    INSERT INTO usage_logs (
-      user_id, provider, model,
-      input_tokens, output_tokens, total_tokens,
-      cached_input_tokens, cache_creation_tokens,
-      cost_usd, request_id, latency_ms, status_code
-    ) VALUES (
-      ${record.userId}, ${record.provider}, ${record.model},
-      ${record.inputTokens}, ${record.outputTokens}, ${record.totalTokens},
-      ${record.cachedInputTokens}, ${record.cacheCreationTokens},
-      ${record.costMicroUsd}::numeric / 1000000, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
-    )
-  `;
-}
+export type RecordUsageOutcome = 'charged' | 'replay' | 'uncharged';
 
 /**
- * Increment a user's spend by a given amount.
- * Uses atomic SQL increment to avoid race conditions.
+ * Record a request's usage AND charge it, atomically, exactly once.
  *
- * @param userId - User ID from JWT sub claim
- * @param costMicroUsd - Amount in integer micro-USD (1e-6 $) to add to spend
+ * One statement: the usage_logs INSERT (unique on request_id — the idempotency key)
+ * and the user_budgets spend UPDATE run in the same transaction, and the UPDATE is
+ * gated on the INSERT having actually inserted a row. So:
+ *   - first attempt: row + charge commit together;
+ *   - retry after a lost ack: the INSERT conflicts, inserts nothing, the UPDATE is
+ *     skipped → 'replay', and nothing is charged twice;
+ *   - a failure anywhere rolls back both → nothing is half-applied.
+ * Two separate writes (the previous design) could never distinguish a lost ack from
+ * a failure and either double-charged or silently under-charged.
+ *
+ * @param record - Usage data to log; costMicroUsd is the integer micro-USD charge.
+ * @returns 'charged' when this call inserted the row and charged spend; 'replay' when
+ *   the request_id was already recorded (and therefore already charged); 'uncharged'
+ *   when the row was inserted but no user_budgets row exists to charge.
  */
-export async function incrementUserSpend(userId: string, costMicroUsd: number): Promise<void> {
+export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOutcome> {
   const sql = getDb();
-  // Reason: add the EXACT micro-USD charge, never rounding up. The /1000000 division
-  // is exact in NUMERIC (power of ten); trunc(…, 6) is a no-op on an integer µ$ input
-  // (kept so the "never round up" guarantee is explicit and survives a precision
-  // change). Once the 2026-08-25 migration widening spend to NUMERIC(12,6) is applied,
-  // this write is lossless and rounding happens exactly once — the user-favoring floor
-  // in calculateCostMicroUsd.
-  //
-  // Before that migration, on the legacy NUMERIC(10,4) column, `spend + 0.000xxx`
-  // still ACCUMULATES (the sum is stored half-up to 4dp, so sub-quantum charges are
-  // not lost — verified: 1000×92µ$ → $0.1000, gate trips normally). The only pre-
-  // migration imperfection is that per-store half-up rounding is mildly house-favoring
-  // (≤$0.0001/request), not the user-favoring floor. Note the ORIGINAL trunc(…, 4)
-  // form DID lose sub-$0.0001 charges to $0 — that leak is what widening + trunc-6
-  // fixes; do not narrow either.
-  await sql`
-    UPDATE user_budgets
-    SET spend = spend + trunc(${costMicroUsd}::numeric / 1000000, 6), updated_at = NOW()
-    WHERE user_id = ${userId}
+  // Reason: trunc(…, 6) keeps the "never round up" guarantee explicit; the /1000000
+  // division is exact in NUMERIC (see the 2026-08-25 spend precision migration).
+  const rows = await sql`
+    WITH ins AS (
+      INSERT INTO usage_logs (
+        user_id, provider, model,
+        input_tokens, output_tokens, total_tokens,
+        cached_input_tokens, cache_creation_tokens,
+        cost_usd, request_id, latency_ms, status_code
+      ) VALUES (
+        ${record.userId}, ${record.provider}, ${record.model},
+        ${record.inputTokens}, ${record.outputTokens}, ${record.totalTokens},
+        ${record.cachedInputTokens}, ${record.cacheCreationTokens},
+        ${record.costMicroUsd}::numeric / 1000000, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
+      )
+      ON CONFLICT (request_id) DO NOTHING
+      RETURNING id
+    ),
+    charged AS (
+      UPDATE user_budgets
+      SET spend = spend + trunc(${record.costMicroUsd}::numeric / 1000000, 6), updated_at = NOW()
+      WHERE user_id = ${record.userId} AND EXISTS (SELECT 1 FROM ins)
+      RETURNING user_id
+    )
+    SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged
   `;
+  const row = rows[0];
+  // The outer SELECT always yields exactly one row; anything else is a driver fault
+  // and must surface as a failure (retried, then logged), never as a silent 'replay'.
+  if (!row) throw new Error('recordUsage returned no rows');
+  if (Number(row.inserted) === 0) return 'replay';
+  return Number(row.charged) > 0 ? 'charged' : 'uncharged';
 }
 
 /**

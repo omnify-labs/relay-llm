@@ -16,8 +16,7 @@ import {
   setUserBudget,
   deleteUserBudget,
   getUserBudget,
-  incrementUserSpend,
-  insertUsageLog,
+  recordUsage,
   type UsageLogInsert,
 } from '../db/queries.js';
 
@@ -127,54 +126,7 @@ describe('getUserBudget', () => {
   });
 });
 
-describe('incrementUserSpend', () => {
-  it('calls SQL update without error', async () => {
-    mockSqlFn.mockResolvedValueOnce([]);
-    await incrementUserSpend('u1', 59_511);
-    expect(mockSqlFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('issues the exact accumulating, never-round-up, row-scoped UPDATE', async () => {
-    // Reason: pin the WHOLE statement. Loose substring checks let these mutations
-    // through (all verified to survive a substring-only assertion): `spend = spend`
-    // (overwrite instead of accumulate → gate never trips), `... , 6) * 2` (2x
-    // overcharge), and a dropped `WHERE user_id = ...` (charges every row). The value
-    // order pins costMicroUsd before userId.
-    mockSqlFn.mockResolvedValueOnce([]);
-    await incrementUserSpend('u1', 59_511);
-    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
-    expect(sql).toBe(
-      'UPDATE user_budgets SET spend = spend + trunc($0::numeric / 1000000, 6), updated_at = NOW() WHERE user_id = $1',
-    );
-    expect(values).toEqual([59_511, 'u1']);
-  });
-
-  it('records sub-$0.0001 charges instead of dropping them to zero spend', async () => {
-    // Reason: a request costing 92 µ$ ($0.000092) is routine on cached reads of budget
-    // models. Truncating the increment at 4 dp would store $0, so a stream of such
-    // requests would never advance spend and the fail-close budget gate would never
-    // trip. Pin the precision (≥6 dp) that makes the charge survive.
-    mockSqlFn.mockResolvedValueOnce([]);
-    await incrementUserSpend('u1', 92);
-    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
-    const decimals = Number(/\/ 1000000, (\d+)\)/.exec(sql)?.[1]);
-    expect(values[0]).toBe(92);
-    expect(decimals).toBeGreaterThanOrEqual(6);
-  });
-
-  it('handles zero amount', async () => {
-    mockSqlFn.mockResolvedValueOnce([]);
-    await incrementUserSpend('u1', 0);
-    expect(mockSqlFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('propagates a DB error', async () => {
-    mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
-    await expect(incrementUserSpend('u1', 59_511)).rejects.toThrow('connection lost');
-  });
-});
-
-describe('insertUsageLog', () => {
+describe('recordUsage (atomic insert + charge)', () => {
   const record: UsageLogInsert = {
     userId: 'u1',
     provider: 'anthropic',
@@ -190,37 +142,54 @@ describe('insertUsageLog', () => {
     statusCode: 200,
   };
 
-  it('inserts every column bound to the matching value in order', async () => {
-    // Reason: pin the full column list AND the positional value binding. A loose
-    // `values.toContain(...)` cannot see a swap that writes, say, output_tokens into
-    // the input_tokens column. The values array must line up 1:1 with the column list
-    // below, with cost_usd derived from the same integer µ$ via exact NUMERIC division.
-    mockSqlFn.mockResolvedValueOnce([]);
-    await insertUsageLog(record);
+  it('issues ONE statement that inserts the row and charges spend only when the row was inserted', async () => {
+    // Reason: pin the whole statement. The idempotency and atomicity live in the SQL
+    // text: ON CONFLICT (request_id) DO NOTHING, the UPDATE gated on EXISTS(ins), the
+    // never-round-up trunc(…, 6), the row-scoped WHERE user_id, and the positional
+    // binding of every value (cost appears twice: the row and the charge).
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '1', charged: '1' }]);
+    await recordUsage(record);
     const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
     expect(sql).toBe(
-      'INSERT INTO usage_logs ( user_id, provider, model, input_tokens, output_tokens, total_tokens, ' +
+      'WITH ins AS ( INSERT INTO usage_logs ( user_id, provider, model, input_tokens, output_tokens, total_tokens, ' +
         'cached_input_tokens, cache_creation_tokens, cost_usd, request_id, latency_ms, status_code ) VALUES ( ' +
-        '$0, $1, $2, $3, $4, $5, $6, $7, $8::numeric / 1000000, $9, $10, $11 )',
+        '$0, $1, $2, $3, $4, $5, $6, $7, $8::numeric / 1000000, $9, $10, $11 ) ' +
+        'ON CONFLICT (request_id) DO NOTHING RETURNING id ), ' +
+        'charged AS ( UPDATE user_budgets SET spend = spend + trunc($12::numeric / 1000000, 6), updated_at = NOW() ' +
+        'WHERE user_id = $13 AND EXISTS (SELECT 1 FROM ins) RETURNING user_id ) ' +
+        'SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged',
     );
     expect(values).toEqual([
-      record.userId, // user_id
-      record.provider, // provider
-      record.model, // model
-      record.inputTokens, // input_tokens
-      record.outputTokens, // output_tokens
-      record.totalTokens, // total_tokens
-      record.cachedInputTokens, // cached_input_tokens
-      record.cacheCreationTokens, // cache_creation_tokens
-      record.costMicroUsd, // cost_usd (÷1e6 in SQL)
-      record.requestId, // request_id
-      record.latencyMs, // latency_ms
-      record.statusCode, // status_code
+      record.userId, record.provider, record.model,
+      record.inputTokens, record.outputTokens, record.totalTokens,
+      record.cachedInputTokens, record.cacheCreationTokens,
+      record.costMicroUsd, record.requestId, record.latencyMs, record.statusCode,
+      record.costMicroUsd, record.userId,
     ]);
   });
 
-  it('propagates a DB error', async () => {
+  it("returns 'charged' only when BOTH the row was inserted and a budget row was debited", async () => {
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '1', charged: '1' }]);
+    expect(await recordUsage(record)).toBe('charged');
+  });
+
+  it("returns 'replay' on a request_id conflict (already recorded and charged)", async () => {
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '0', charged: '0' }]);
+    expect(await recordUsage(record)).toBe('replay');
+  });
+
+  it("returns 'uncharged' when the row was inserted but no user_budgets row exists to debit", async () => {
+    mockSqlFn.mockResolvedValueOnce([{ inserted: '1', charged: '0' }]);
+    expect(await recordUsage(record)).toBe('uncharged');
+  });
+
+  it('throws on an empty result set instead of reporting a silent replay', async () => {
+    mockSqlFn.mockResolvedValueOnce([]);
+    await expect(recordUsage(record)).rejects.toThrow('no rows');
+  });
+
+  it('propagates a DB error (the caller retries the whole atomic write)', async () => {
     mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
-    await expect(insertUsageLog(record)).rejects.toThrow('connection lost');
+    await expect(recordUsage(record)).rejects.toThrow('connection lost');
   });
 });
