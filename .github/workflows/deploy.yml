@@ -42,11 +42,20 @@ jobs:
           tags: ghcr.io/omnify-labs/relay-llm:${{ github.sha }}
       - name: Deploy over SSH (pull + blue-green)
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.DROPLET_HOST }}
           username: root
           key: ${{ secrets.DROPLET_SSH_KEY }}
+          envs: GHCR_USER,GHCR_TOKEN
           script: |
             set -euo pipefail
+            # The droplet's stored GHCR login expired on 2026-07-16 ("error from
+            # registry: denied" on every pull since). Log in with this run's token
+            # instead of a long-lived credential on the box: it can read the
+            # package this workflow just pushed, and it expires with the run.
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             docker pull "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
             /srv/relay-llm/deploy.sh "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
