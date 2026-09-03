@@ -69,10 +69,11 @@ describe('litellm-pricing', () => {
     expect(p.cachedInputMicro).toBe(75_000n);
   });
 
-  it('maps absent price fields to 0n micro rates and omits above-200k micro fields', () => {
+  it('maps an absent output price to 0n, absent cache prices to the INPUT rate, and omits above-200k fields', () => {
     const p = normalizeEntry({ input_cost_per_token: 2e-6 });
     expect(p.outputMicro).toBe(0n);
-    expect(p.cacheCreationMicro).toBe(0n);
+    expect(p.cachedInputMicro).toBe(2_000_000n);
+    expect(p.cacheCreationMicro).toBe(2_000_000n);
     expect(p.inputMicroAbove200k).toBeUndefined();
   });
 
@@ -103,7 +104,7 @@ describe('litellm-pricing', () => {
 
   it('logs a loud error at table build when a served model has no price', async () => {
     // Reason: covers the buildPricingTable() missing-model branch — a silent gap
-    // here means DEFAULT_PRICING overcharge in production, so the error must fire.
+    // here means CEILING-pricing overcharge in production, so the error must fire.
     vi.resetModules();
     vi.doMock('../../vendor/litellm/model_prices_and_context_window.json', () => ({ default: {} }));
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});

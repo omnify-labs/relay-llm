@@ -33,14 +33,45 @@ export interface ModelPricing {
 }
 
 /** Only the LiteLLM fields relay consumes; the file has many more we ignore. */
-interface LiteLLMEntry {
+export interface LiteLLMEntry {
   input_cost_per_token?: number;
   output_cost_per_token?: number;
   cache_read_input_token_cost?: number;
   cache_creation_input_token_cost?: number;
+  cache_creation_input_token_cost_above_1hr?: number;
   input_cost_per_token_above_200k_tokens?: number;
   output_cost_per_token_above_200k_tokens?: number;
   cache_read_input_token_cost_above_200k_tokens?: number;
+  litellm_provider?: string;
+  mode?: string;
+  deprecation_date?: string;
+  // Reason: LiteLLM adds context/duration tiers ad hoc (`_above_200k_tokens`,
+  // `_above_272k_tokens`, `_above_1hr`, …). The ceiling must see ALL of them, so
+  // pricing.ts scans keys by pattern rather than enumerating suffixes here.
+  [tierField: string]: number | string | undefined;
+}
+
+/**
+ * Every per-token price on an entry for one component, across all tier suffixes.
+ *
+ * @param entry - Raw LiteLLM entry.
+ * @param component - 'input' | 'output' | 'cache_read_input' | 'cache_creation_input'.
+ * @returns All numeric values of `<component>_cost_per_token` and `<component>_cost_per_token_above_*`
+ *   (or `<component>_token_cost`/`_above_*` for the cache fields).
+ */
+export function tierPrices(
+  entry: LiteLLMEntry,
+  component: 'input' | 'output' | 'cache_read_input' | 'cache_creation_input',
+): number[] {
+  const base = component === 'input' || component === 'output'
+    ? `${component}_cost_per_token`
+    : `${component}_token_cost`;
+  const re = new RegExp(`^${base}(_above_\\w+)?$`);
+  const out: number[] = [];
+  for (const [k, v] of Object.entries(entry)) {
+    if (re.test(k) && typeof v === 'number') out.push(v);
+  }
+  return out;
 }
 
 const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>; // Reason: the JSON import infers a deep literal type; `as unknown` widens it to a typed Record without @ts-ignore.
@@ -60,27 +91,59 @@ export const SERVED_MODELS: readonly string[] = [
   // 2026-08 lineup: gemini-3.7-flash supersedes 3.6 as the managed default
   // (dassi). Google priced it at HALF of 3.6's original rate — $0.75/$3.75 with a
   // $0.075 cache read — and, in the same upstream refresh, halved 3.6 to match.
-  // Serving 3.7 without this entry would bill it at DEFAULT_PRICING ($3.00/M
-  // input, and $3.00/M on cached reads with no discount): 4x the real input rate
-  // and 40x the real cached rate on exactly the long, heavily-cached browser
-  // sessions it is meant for.
+  // Serving 3.7 without this entry would bill it at CEILING pricing (the most
+  // expensive served rate per component, no cache discount): many times the real
+  // input rate and orders of magnitude over the real cached rate on exactly the
+  // long, heavily-cached browser sessions it is meant for.
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   // 2026-08 lineup: gemini-3.5-flash-lite is the managed budget tier (dassi PR
   // #2541). At $0.30/$2.50 with a $0.03 cache read it is 5x cheaper on input
   // than gemini-3.5-flash — the point of adding it. Serving it WITHOUT this
   // entry would be worse than not serving it at all: buildPricingTable() only
-  // covers SERVED_MODELS, so it would fall to DEFAULT_PRICING at $3.00/M input
-  // and, critically, $3.00/M on cached reads (no discount) — ~100x the real
-  // cached rate on the long, heavily-cached browser sessions it is meant for.
+  // covers SERVED_MODELS, so it would fall to CEILING pricing (no cache discount)
+  // — orders of magnitude over the real cached rate on the long, heavily-cached
+  // browser sessions it is meant for.
   'gemini-3.5-flash-lite',
   'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview',
   // NOTE: gemini-2.0-flash is deprecated by Google (shutdown ~2026-06-01). Kept
   // here so any residual traffic is still priced correctly ($0.10/$0.40) rather
-  // than falling to the conservative DEFAULT_PRICING; remove once upstream drops
+  // than falling to CEILING pricing; remove once upstream drops
   // it (missingServedModels() will flag it then).
   'gemini-2.5-pro-preview', 'gemini-2.0-flash',
 ];
+
+/**
+ * Providers relay can reach (src/index.ts routes) as LiteLLM names them. Gemini rows
+ * appear under both `gemini` and `vertex_ai-language-models`.
+ */
+const PROXIED_PROVIDERS = new Set(['openai', 'anthropic', 'gemini', 'vertex_ai-language-models']);
+const BILLABLE_MODES = new Set(['chat', 'responses']);
+
+/**
+ * Whether an entry is a model a client could name through relay: a proxied provider
+ * and a chat/responses model. Deprecation dates are deliberately ignored — LiteLLM's
+ * date is not the provider's real shutdown, and a row past it can only RAISE the
+ * ceiling, so excluding it would let the ceiling sink below a price still charged.
+ *
+ * @param entry - Raw LiteLLM entry.
+ * @returns True when the entry may be billed from its own row and bounds the ceiling.
+ */
+export function isProxiedEntry(entry: LiteLLMEntry): boolean {
+  return PROXIED_PROVIDERS.has(entry.litellm_provider ?? '') && BILLABLE_MODES.has(entry.mode ?? '');
+}
+
+/**
+ * Every proxied entry in the vendored table (NOT just served models). Feeds the
+ * ceiling for unknown ids: the proxy forwards any model a client names, so the ceiling
+ * must cover the most expensive thing a provider has ever sold, not the most
+ * expensive thing we chose to list.
+ *
+ * @returns Raw entries with their LiteLLM keys.
+ */
+export function proxiedEntries(): Array<[string, LiteLLMEntry]> {
+  return Object.entries(RAW).filter(([, e]) => isProxiedEntry(e));
+}
 
 /** relay model id -> LiteLLM key, for the few that don't match exactly. */
 export const ALIASES: Record<string, string> = {
@@ -96,7 +159,7 @@ function toMillion(perToken: number | undefined): number {
  * @param perToken - Per-token USD price from the LiteLLM table (or undefined).
  * @returns Integer µ$/Mtok as bigint (0n when the price is absent).
  */
-function toMicro(perToken: number | undefined): bigint {
+export function toMicro(perToken: number | undefined): bigint {
   // Reason: one exact translation of the published price at table-build time
   // (µ$/Mtok = $/tok × 1e12). Real prices have ≤12 decimal places per token, so
   // round() only strips binary-float noise, never real price digits.
@@ -109,15 +172,20 @@ function toMicro(perToken: number | undefined): bigint {
  * @returns ModelPricing with all rates converted from per-token to per-million.
  */
 export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
+  // Reason: a row with no cache price means the provider does not discount (or does
+  // not support) caching for that model. Should the provider report cached tokens
+  // anyway, they bill at the input rate — never at the $0 a missing field would imply.
+  const cacheRead = entry.cache_read_input_token_cost ?? entry.input_cost_per_token;
+  const cacheCreation = entry.cache_creation_input_token_cost ?? entry.input_cost_per_token;
   const pricing: ModelPricing = {
     inputPerMillion: toMillion(entry.input_cost_per_token),
     outputPerMillion: toMillion(entry.output_cost_per_token),
-    cachedInputPerMillion: toMillion(entry.cache_read_input_token_cost),
-    cacheCreationPerMillion: toMillion(entry.cache_creation_input_token_cost),
+    cachedInputPerMillion: toMillion(cacheRead),
+    cacheCreationPerMillion: toMillion(cacheCreation),
     inputMicro: toMicro(entry.input_cost_per_token),
     outputMicro: toMicro(entry.output_cost_per_token),
-    cachedInputMicro: toMicro(entry.cache_read_input_token_cost),
-    cacheCreationMicro: toMicro(entry.cache_creation_input_token_cost),
+    cachedInputMicro: toMicro(cacheRead),
+    cacheCreationMicro: toMicro(cacheCreation),
   };
   if (entry.input_cost_per_token_above_200k_tokens != null) {
     pricing.inputPerMillionAbove200k = toMillion(entry.input_cost_per_token_above_200k_tokens);
@@ -194,11 +262,11 @@ function buildPricingTable(): Record<string, ModelPricing> {
   }
   const missing = missingServedModels();
   if (missing.length > 0) {
-    // Reason: a missing served model falls to DEFAULT_PRICING (conservative) in
-    // calculateCostMicroUsd — log loud so coverage gaps surface instead of
-    // silently mischarging.
+    // Reason: a missing served model falls to CEILING pricing (fail-closed, over-bills)
+    // in calculateCostMicroUsd — log loud so coverage gaps surface instead of
+    // silently over-charging real users.
     console.error(
-      `[Relay] LiteLLM pricing MISSING for served models: ${missing.join(', ')} — falling back to DEFAULT_PRICING.`,
+      `[Relay] LiteLLM pricing MISSING for served models: ${missing.join(', ')} — billing them at CEILING pricing.`,
     );
   }
   return table;

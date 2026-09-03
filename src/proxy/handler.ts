@@ -255,7 +255,7 @@ async function extractAndLogUsageFromBody(
   }
 }
 
-interface ParsedUsage {
+export interface ParsedUsage {
   model: string | null;
   inputTokens: number;
   outputTokens: number;
@@ -271,20 +271,31 @@ interface ParsedUsage {
  * - inputTokens always = total prompt tokens (including cached)
  * - Anthropic: input_tokens does NOT include cache tokens, so we add them back
  * - OpenAI/Google: prompt_tokens already includes cached, use as-is
+ *
+ * @param body - Raw (non-streaming) response body text.
+ * @param provider - Upstream provider the request was proxied to (selects the usage schema).
+ * @returns Parsed token usage, or null when the payload carries no usage block.
  */
-function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage | null {
+export function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage | null {
   try {
     const json = JSON.parse(body);
 
     switch (provider) {
-      case 'openai':
+      case 'openai': {
+        // Reason: Chat Completions reports prompt_tokens/completion_tokens; the
+        // Responses API reports input_tokens/output_tokens (with
+        // input_tokens_details.cached_tokens). Missing the second shape logged the
+        // pro-tier Responses-only models at 0 tokens — billed $0.
+        const u = json.usage;
         return {
           model: json.model,
-          inputTokens: json.usage?.prompt_tokens || 0,
-          outputTokens: json.usage?.completion_tokens || 0,
-          cachedInputTokens: json.usage?.prompt_tokens_details?.cached_tokens || 0,
+          inputTokens: u?.prompt_tokens || u?.input_tokens || 0,
+          outputTokens: u?.completion_tokens || u?.output_tokens || 0,
+          cachedInputTokens:
+            u?.prompt_tokens_details?.cached_tokens || u?.input_tokens_details?.cached_tokens || 0,
           cacheCreationTokens: 0,
         };
+      }
       case 'anthropic': {
         const baseInput = json.usage?.input_tokens || 0;
         const cacheRead = json.usage?.cache_read_input_tokens || 0;
@@ -322,8 +333,12 @@ function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage |
  * Semantic normalization:
  * - inputTokens always = total prompt tokens (including cached)
  * - Anthropic: message_start sets input/cache fields; message_delta only updates outputTokens (cache fields preserved)
+ *
+ * @param sseText - Full accumulated SSE stream text.
+ * @param provider - Upstream provider the request was proxied to (selects the usage schema).
+ * @returns Parsed token usage, or null when the payload carries no usage block.
  */
-function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage | null {
+export function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage | null {
   const lines = sseText.split('\n');
   let lastModel: string | null = null;
   let lastUsage: ParsedUsage | null = null;
@@ -337,18 +352,24 @@ function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage
       const json = JSON.parse(data);
 
       switch (provider) {
-        case 'openai':
+        case 'openai': {
+          // Reason: Responses API streams carry model + usage under `response.*` on the
+          // terminal `response.completed` event, not at the top level like Chat.
           if (json.model) lastModel = json.model;
-          if (json.usage) {
+          if (json.response?.model) lastModel = json.response.model;
+          const u = json.usage ?? json.response?.usage;
+          if (u) {
             lastUsage = {
               model: lastModel,
-              inputTokens: json.usage.prompt_tokens || 0,
-              outputTokens: json.usage.completion_tokens || 0,
-              cachedInputTokens: json.usage.prompt_tokens_details?.cached_tokens || 0,
+              inputTokens: u.prompt_tokens || u.input_tokens || 0,
+              outputTokens: u.completion_tokens || u.output_tokens || 0,
+              cachedInputTokens:
+                u.prompt_tokens_details?.cached_tokens || u.input_tokens_details?.cached_tokens || 0,
               cacheCreationTokens: 0,
             };
           }
           break;
+        }
         case 'anthropic': {
           if (json.type === 'message_start' && json.message?.model) {
             lastModel = json.message.model;
