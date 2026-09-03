@@ -258,6 +258,10 @@ curl -X PUT http://localhost:8080/admin/users/user-uuid/budget \
 curl -X DELETE http://localhost:8080/admin/users/user-uuid \
   -H "Authorization: Bearer $RELAY_ADMIN_SECRET"
 
+# `budget` is the PLAN base. Purchased credit (below) is kept on top of it on every
+# write, and reset_spend first draws the over-base spend down from those purchases —
+# so a renewal, tier change or cancellation never wipes credit the user paid for.
+
 # Add purchased credit ($10.00) — exactly once per idempotency key
 curl -X POST https://relay.example.com/admin/users/USER_ID/budget/increment \
   -H "Authorization: Bearer $RELAY_ADMIN_SECRET" \

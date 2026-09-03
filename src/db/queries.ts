@@ -109,12 +109,19 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
 }
 
 /**
- * Set or create a user's budget. Optionally reset spend to 0.
- * Uses upsert — creates the record if it doesn't exist.
+ * Set a user's PLAN budget, keeping their purchased credit on top of it.
+ *
+ * `budget` is the plan base (tier allocation, free floor, or 0 on revocation). The
+ * stored ceiling is always `base + remaining purchased credit`, so an absolute plan
+ * write from any caller (renewal, tier change, cancellation, trial expiry) can never
+ * wipe credit the user paid for. With `resetSpend`, the spend that exceeded the
+ * previous base is first drawn down FIFO from the purchases (that is the money it
+ * was actually spent from), then spend restarts at 0. All of it is ONE statement, so
+ * a purchase landing concurrently is neither lost nor double-counted.
  *
  * @param userId - User ID
- * @param budget - Budget ceiling in USD
- * @param resetSpend - If true, resets spend to 0 (for subscription renewal)
+ * @param budget - Plan base in USD (purchased credit is added on top)
+ * @param resetSpend - Start a new cycle: draw down purchases by the over-base spend, zero spend
  * @returns True if the record was created or updated
  */
 export async function setUserBudget(
@@ -125,19 +132,43 @@ export async function setUserBudget(
   const sql = getDb();
   if (resetSpend) {
     const result = await sql`
-      INSERT INTO user_budgets (user_id, budget, spend)
-      VALUES (${userId}, ${budget}, 0)
-      ON CONFLICT (user_id) DO UPDATE
-      SET budget = ${budget}, spend = 0, updated_at = NOW()
-      RETURNING user_id
+      WITH cur AS (
+        SELECT budget, spend FROM user_budgets WHERE user_id = ${userId}
+      ),
+      purchased AS (
+        SELECT idempotency_key, remaining_cents,
+          COALESCE(SUM(remaining_cents) OVER (ORDER BY created_at, idempotency_key ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS prior_cents
+        FROM budget_increments WHERE user_id = ${userId} AND remaining_cents > 0
+      ),
+      consumed AS (
+        SELECT COALESCE((
+          SELECT GREATEST(0, floor((cur.spend - (cur.budget - (SELECT COALESCE(SUM(remaining_cents), 0) FROM purchased) / 100.0)) * 100))::bigint
+          FROM cur
+        ), 0) AS cents
+      ),
+      drawn AS (
+        UPDATE budget_increments b
+        SET remaining_cents = b.remaining_cents - LEAST(b.remaining_cents, GREATEST(0, c.cents - p.prior_cents))::int
+        FROM purchased p, consumed c
+        WHERE b.idempotency_key = p.idempotency_key
+        RETURNING b.remaining_cents
+      ),
+      upsert AS (
+        INSERT INTO user_budgets (user_id, budget, spend)
+        VALUES (${userId}, ${budget}::numeric + (SELECT COALESCE(SUM(remaining_cents), 0) FROM drawn) / 100.0, 0)
+        ON CONFLICT (user_id) DO UPDATE
+        SET budget = EXCLUDED.budget, spend = 0, updated_at = NOW()
+        RETURNING user_id
+      )
+      SELECT user_id FROM upsert
     `;
     return result.length > 0;
   } else {
     const result = await sql`
       INSERT INTO user_budgets (user_id, budget)
-      VALUES (${userId}, ${budget})
+      VALUES (${userId}, ${budget}::numeric + (SELECT COALESCE(SUM(remaining_cents), 0) FROM budget_increments WHERE user_id = ${userId}) / 100.0)
       ON CONFLICT (user_id) DO UPDATE
-      SET budget = ${budget}, updated_at = NOW()
+      SET budget = EXCLUDED.budget, updated_at = NOW()
       RETURNING user_id
     `;
     return result.length > 0;
@@ -161,7 +192,8 @@ export interface BudgetIncrementResult {
  * nothing, adds nothing, and still returns the current ledger — the caller (a
  * Stripe webhook that will be redelivered) can retry freely. Cents become dollars
  * once, inside SQL, so no float ever carries the amount. A user with no budget row
- * gets one holding just the delta.
+ * gets one holding just the delta. The purchase's remaining_cents starts full; the
+ * plan-budget reset in setUserBudget draws it down as it is spent.
  *
  * @param userId - User whose budget grows.
  * @param deltaCents - Positive integer cents to add.
@@ -176,8 +208,8 @@ export async function incrementUserBudget(
   const sql = getDb();
   const rows = await sql`
     WITH ins AS (
-      INSERT INTO budget_increments (idempotency_key, user_id, delta_cents)
-      VALUES (${idempotencyKey}, ${userId}, ${deltaCents})
+      INSERT INTO budget_increments (idempotency_key, user_id, delta_cents, remaining_cents)
+      VALUES (${idempotencyKey}, ${userId}, ${deltaCents}, ${deltaCents})
       ON CONFLICT (idempotency_key) DO NOTHING
       RETURNING delta_cents
     ),

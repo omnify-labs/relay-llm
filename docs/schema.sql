@@ -140,21 +140,30 @@ ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NO
 ALTER TABLE usage_logs ALTER COLUMN request_id SET NOT NULL;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);
 
--- Purchased-credit increments (2026-09-03)
--- budget_increments is the idempotency ledger for POST /admin/users/:id/budget/increment:
--- one row per purchase (idempotency_key = the Stripe payment_intent). The endpoint
--- claims the key and upserts user_budgets in ONE statement, the upsert fed from the
--- claim, so a redelivered webhook adds nothing twice and can retry until acknowledged.
+-- Purchased credit (2026-09-03)
+-- budget_increments is the purchased-credit ledger, one row per purchase:
+--   * idempotency for POST /admin/users/:id/budget/increment — idempotency_key is
+--     the Stripe payment_intent; the endpoint claims the key and upserts user_budgets
+--     in ONE statement (upsert fed from the claim), so a redelivered webhook adds
+--     nothing twice and can retry until acknowledged;
+--   * remaining_cents is what is left of that purchase. Purchased credit never
+--     expires: user_budgets.budget is ALWAYS plan base + SUM(remaining_cents)/100,
+--     which PUT /budget maintains on every plan write, and a cycle reset first draws
+--     the over-base spend down from purchases FIFO. Purchases survive DELETE /users/:id
+--     (a re-provisioned row picks them back up).
 -- Additive: create BEFORE merging the endpoint (merging to main deploys).
--- Applied to the production Supabase on 2026-09-03.
+-- Applied to the production Supabase on 2026-09-03 (table, column, grant).
 CREATE TABLE IF NOT EXISTS budget_increments (
   idempotency_key TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   delta_cents INTEGER NOT NULL CHECK (delta_cents > 0),
+  remaining_cents INTEGER NOT NULL DEFAULT 0 CHECK (remaining_cents >= 0),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE budget_increments ADD COLUMN IF NOT EXISTS remaining_cents INTEGER NOT NULL DEFAULT 0 CHECK (remaining_cents >= 0);
 CREATE INDEX IF NOT EXISTS idx_budget_increments_user_id ON budget_increments(user_id, created_at DESC);
 -- Same PostgREST hardening as the other ledger tables (relay bypasses RLS as owner).
+-- The dassi edge functions (service_role) read remaining_cents to display it.
 ALTER TABLE budget_increments ENABLE ROW LEVEL SECURITY;
 DO $$
 BEGIN
@@ -163,5 +172,8 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
     REVOKE ALL ON budget_increments FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT SELECT ON budget_increments TO service_role;
   END IF;
 END $$;

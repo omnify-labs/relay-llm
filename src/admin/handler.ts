@@ -10,11 +10,13 @@ import { revokeUser } from '../billing/run-admission.js';
 export const adminApp = new Hono();
 
 /**
- * PUT /users/:user_id/budget — Set or reset a user's budget.
+ * PUT /users/:user_id/budget — Set or reset a user's PLAN budget.
  * Request body: { budget: number, reset_spend?: boolean }
  * Response: 200 { user_id: string, updated: true }
  *
- * @remarks Uses upsert — creates the budget record if it doesn't exist.
+ * @remarks Uses upsert — creates the budget record if it doesn't exist. `budget` is
+ * the plan base; purchased credit (budget/increment) is kept on top of it, and a
+ * reset first draws the over-base spend down from those purchases.
  */
 adminApp.put('/users/:user_id/budget', async (c) => {
   const userId = c.req.param('user_id');

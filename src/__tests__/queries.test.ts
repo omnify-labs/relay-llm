@@ -57,6 +57,40 @@ describe('setUserBudget', () => {
     expect(mockSqlFn).toHaveBeenCalledTimes(1);
   });
 
+  it('resetSpend:false — ONE statement writing base + remaining purchased credit, spend untouched', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ user_id: 'u1' }]);
+    await setUserBudget('u1', 200, false);
+    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
+    expect(sql).toBe(
+      'INSERT INTO user_budgets (user_id, budget) VALUES ($0, $1::numeric + ' +
+        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM budget_increments WHERE user_id = $2) / 100.0) ' +
+        'ON CONFLICT (user_id) DO UPDATE SET budget = EXCLUDED.budget, updated_at = NOW() RETURNING user_id',
+    );
+    expect(values).toEqual(['u1', 200, 'u1']);
+  });
+
+  it('resetSpend:true — ONE statement: FIFO draw-down of over-base spend, then base + remaining, spend = 0', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ user_id: 'u1' }]);
+    await setUserBudget('u1', 50, true);
+    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
+    expect(sql).toBe(
+      'WITH cur AS ( SELECT budget, spend FROM user_budgets WHERE user_id = $0 ), ' +
+        'purchased AS ( SELECT idempotency_key, remaining_cents, COALESCE(SUM(remaining_cents) OVER ' +
+        '(ORDER BY created_at, idempotency_key ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS prior_cents ' +
+        'FROM budget_increments WHERE user_id = $1 AND remaining_cents > 0 ), ' +
+        'consumed AS ( SELECT COALESCE(( SELECT GREATEST(0, floor((cur.spend - (cur.budget - ' +
+        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM purchased) / 100.0)) * 100))::bigint FROM cur ), 0) AS cents ), ' +
+        'drawn AS ( UPDATE budget_increments b SET remaining_cents = b.remaining_cents - ' +
+        'LEAST(b.remaining_cents, GREATEST(0, c.cents - p.prior_cents))::int FROM purchased p, consumed c ' +
+        'WHERE b.idempotency_key = p.idempotency_key RETURNING b.remaining_cents ), ' +
+        'upsert AS ( INSERT INTO user_budgets (user_id, budget, spend) VALUES ($2, $3::numeric + ' +
+        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM drawn) / 100.0, 0) ' +
+        'ON CONFLICT (user_id) DO UPDATE SET budget = EXCLUDED.budget, spend = 0, updated_at = NOW() RETURNING user_id ) ' +
+        'SELECT user_id FROM upsert',
+    );
+    expect(values).toEqual(['u1', 'u1', 'u1', 50]);
+  });
+
   it('calls different SQL paths for resetSpend true vs false', async () => {
     // Reason: The two branches produce different SQL (one zeros spend, the other doesn't).
     // We verify both branches are reachable and produce results.
@@ -202,16 +236,16 @@ describe('incrementUserBudget (exactly-once purchased credit)', () => {
     expect(mockSqlFn).toHaveBeenCalledTimes(1);
     const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
     expect(sql).toBe(
-      'WITH ins AS ( INSERT INTO budget_increments (idempotency_key, user_id, delta_cents) VALUES ($0, $1, $2) ' +
+      'WITH ins AS ( INSERT INTO budget_increments (idempotency_key, user_id, delta_cents, remaining_cents) VALUES ($0, $1, $2, $3) ' +
         'ON CONFLICT (idempotency_key) DO NOTHING RETURNING delta_cents ), ' +
-        'applied AS ( INSERT INTO user_budgets (user_id, budget, spend) SELECT $3, delta_cents::numeric / 100, 0 FROM ins ' +
+        'applied AS ( INSERT INTO user_budgets (user_id, budget, spend) SELECT $4, delta_cents::numeric / 100, 0 FROM ins ' +
         'ON CONFLICT (user_id) DO UPDATE SET budget = user_budgets.budget + EXCLUDED.budget, updated_at = NOW() ' +
         'RETURNING budget, spend ) ' +
         'SELECT (SELECT count(*) FROM ins) AS applied, ' +
-        'COALESCE((SELECT budget FROM applied), (SELECT budget FROM user_budgets WHERE user_id = $4)) AS budget, ' +
-        'COALESCE((SELECT spend FROM applied), (SELECT spend FROM user_budgets WHERE user_id = $5)) AS spend',
+        'COALESCE((SELECT budget FROM applied), (SELECT budget FROM user_budgets WHERE user_id = $5)) AS budget, ' +
+        'COALESCE((SELECT spend FROM applied), (SELECT spend FROM user_budgets WHERE user_id = $6)) AS spend',
     );
-    expect(values).toEqual(['pi_1', 'u1', 1000, 'u1', 'u1', 'u1']);
+    expect(values).toEqual(['pi_1', 'u1', 1000, 1000, 'u1', 'u1', 'u1']);
   });
 
   it('maps a fresh key to applied:true with the post-increment ledger', async () => {
