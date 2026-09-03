@@ -144,6 +144,64 @@ export async function setUserBudget(
   }
 }
 
+/** Post-increment ledger state, plus whether THIS call applied the delta. */
+export interface BudgetIncrementResult {
+  /** False when the idempotency key had already been applied (a replay). */
+  applied: boolean;
+  budget: number;
+  spend: number;
+}
+
+/**
+ * Raise a user's budget by an integer number of cents, exactly once per
+ * idempotency key (a purchase's Stripe payment_intent).
+ *
+ * One statement: the key is claimed in budget_increments (`ON CONFLICT DO NOTHING`)
+ * and the user_budgets upsert is fed FROM that claim, so a replayed key inserts
+ * nothing, adds nothing, and still returns the current ledger — the caller (a
+ * Stripe webhook that will be redelivered) can retry freely. Cents become dollars
+ * once, inside SQL, so no float ever carries the amount. A user with no budget row
+ * gets one holding just the delta.
+ *
+ * @param userId - User whose budget grows.
+ * @param deltaCents - Positive integer cents to add.
+ * @param idempotencyKey - Unique per purchase; a repeat is a no-op.
+ * @returns Post-increment budget/spend and whether this call applied the delta.
+ */
+export async function incrementUserBudget(
+  userId: string,
+  deltaCents: number,
+  idempotencyKey: string,
+): Promise<BudgetIncrementResult> {
+  const sql = getDb();
+  const rows = await sql`
+    WITH ins AS (
+      INSERT INTO budget_increments (idempotency_key, user_id, delta_cents)
+      VALUES (${idempotencyKey}, ${userId}, ${deltaCents})
+      ON CONFLICT (idempotency_key) DO NOTHING
+      RETURNING delta_cents
+    ),
+    applied AS (
+      INSERT INTO user_budgets (user_id, budget, spend)
+      SELECT ${userId}, delta_cents::numeric / 100, 0 FROM ins
+      ON CONFLICT (user_id) DO UPDATE
+      SET budget = user_budgets.budget + EXCLUDED.budget, updated_at = NOW()
+      RETURNING budget, spend
+    )
+    SELECT
+      (SELECT count(*) FROM ins) AS applied,
+      COALESCE((SELECT budget FROM applied), (SELECT budget FROM user_budgets WHERE user_id = ${userId})) AS budget,
+      COALESCE((SELECT spend FROM applied), (SELECT spend FROM user_budgets WHERE user_id = ${userId})) AS spend
+  `;
+  const row = rows[0];
+  if (!row) throw new Error('incrementUserBudget returned no rows');
+  return {
+    applied: Number(row.applied) > 0,
+    budget: parseFloat(row.budget) || 0,
+    spend: parseFloat(row.spend) || 0,
+  };
+}
+
 /**
  * Delete a user's budget record.
  *

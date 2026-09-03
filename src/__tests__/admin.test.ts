@@ -23,11 +23,12 @@ vi.mock('../config/env.js', () => ({
 vi.mock('../db/queries.js', () => ({
   setUserBudget: vi.fn().mockResolvedValue(undefined),
   deleteUserBudget: vi.fn().mockResolvedValue(true),
+  incrementUserBudget: vi.fn().mockResolvedValue({ applied: true, budget: 60, spend: 50.0214 }),
 }));
 
 import { adminAuthMiddleware } from '../admin/middleware.js';
 import { adminApp } from '../admin/handler.js';
-import { setUserBudget, deleteUserBudget } from '../db/queries.js';
+import { setUserBudget, deleteUserBudget, incrementUserBudget } from '../db/queries.js';
 
 /**
  * Build a test app matching production route structure:
@@ -109,6 +110,60 @@ describe('adminApp handlers', () => {
   beforeEach(() => {
     app = buildTestApp();
     vi.clearAllMocks();
+  });
+
+  describe('POST /admin/users/:user_id/budget/increment', () => {
+    const post = (body: unknown) =>
+      app.request('/admin/users/user-42/budget/increment', {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify(body),
+      });
+
+    it('applies a purchase once and returns the post-increment ledger', async () => {
+      const res = await post({ delta_cents: 1000, idempotency_key: 'pi_1' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ user_id: 'user-42', applied: true, budget: 60, spend: 50.0214 });
+      expect(incrementUserBudget).toHaveBeenCalledWith('user-42', 1000, 'pi_1');
+    });
+
+    it('reports a replayed key as applied:false with 200 so the caller can stop retrying', async () => {
+      vi.mocked(incrementUserBudget).mockResolvedValueOnce({ applied: false, budget: 60, spend: 50.0214 });
+      const res = await post({ delta_cents: 1000, idempotency_key: 'pi_1' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).applied).toBe(false);
+    });
+
+    it.each<[unknown, string]>([
+      [{ delta_cents: 0, idempotency_key: 'pi' }, 'zero'],
+      [{ delta_cents: -500, idempotency_key: 'pi' }, 'negative'],
+      [{ delta_cents: 10.5, idempotency_key: 'pi' }, 'fractional'],
+      [{ delta_cents: '1000', idempotency_key: 'pi' }, 'string'],
+      [{ delta_cents: Number.MAX_SAFE_INTEGER + 2, idempotency_key: 'pi' }, 'unsafe'],
+      [{ delta_cents: 1000 }, 'missing key'],
+      [{ delta_cents: 1000, idempotency_key: '' }, 'empty key'],
+      [{ delta_cents: 1000, idempotency_key: 'x'.repeat(256) }, 'oversized key'],
+    ])('rejects %j (%s) with 400 and never touches the ledger', async (body: unknown) => {
+      const res = await post(body);
+      expect(res.status).toBe(400);
+      expect(incrementUserBudget).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed JSON body with 400', async () => {
+      const res = await app.request('/admin/users/user-42/budget/increment', {
+        method: 'POST',
+        headers: authHeaders,
+        body: '{not json',
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('returns 500 (so the webhook retries) when the ledger write fails', async () => {
+      vi.mocked(incrementUserBudget).mockRejectedValueOnce(new Error('db down'));
+      const res = await post({ delta_cents: 1000, idempotency_key: 'pi_1' });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: 'Failed to increment budget' });
+    });
   });
 
   describe('PUT /admin/users/:user_id/budget', () => {

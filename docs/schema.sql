@@ -139,3 +139,29 @@ ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NO
 -- Applied to the production Supabase on 2026-09-03 (index VALID, 430,395 rows).
 ALTER TABLE usage_logs ALTER COLUMN request_id SET NOT NULL;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);
+
+-- Purchased-credit increments (2026-09-03)
+-- budget_increments is the idempotency ledger for POST /admin/users/:id/budget/increment:
+-- one row per purchase (idempotency_key = the Stripe payment_intent). The endpoint
+-- claims the key and upserts user_budgets in ONE statement, the upsert fed from the
+-- claim, so a redelivered webhook adds nothing twice and can retry until acknowledged.
+-- Additive: create BEFORE merging the endpoint (merging to main deploys).
+-- Applied to the production Supabase on 2026-09-03.
+CREATE TABLE IF NOT EXISTS budget_increments (
+  idempotency_key TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  delta_cents INTEGER NOT NULL CHECK (delta_cents > 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_budget_increments_user_id ON budget_increments(user_id, created_at DESC);
+-- Same PostgREST hardening as the other ledger tables (relay bypasses RLS as owner).
+ALTER TABLE budget_increments ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON budget_increments FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON budget_increments FROM anon;
+  END IF;
+END $$;

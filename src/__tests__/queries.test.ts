@@ -16,6 +16,7 @@ import {
   setUserBudget,
   deleteUserBudget,
   getUserBudget,
+  incrementUserBudget,
   recordUsage,
   type UsageLogInsert,
 } from '../db/queries.js';
@@ -191,5 +192,47 @@ describe('recordUsage (atomic insert + charge)', () => {
   it('propagates a DB error (the caller retries the whole atomic write)', async () => {
     mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
     await expect(recordUsage(record)).rejects.toThrow('connection lost');
+  });
+});
+
+describe('incrementUserBudget (exactly-once purchased credit)', () => {
+  it('issues ONE statement: claims the idempotency key and feeds the upsert from that claim', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ applied: '1', budget: '60.0000', spend: '50.021400' }]);
+    await incrementUserBudget('u1', 1000, 'pi_1');
+    expect(mockSqlFn).toHaveBeenCalledTimes(1);
+    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
+    expect(sql).toBe(
+      'WITH ins AS ( INSERT INTO budget_increments (idempotency_key, user_id, delta_cents) VALUES ($0, $1, $2) ' +
+        'ON CONFLICT (idempotency_key) DO NOTHING RETURNING delta_cents ), ' +
+        'applied AS ( INSERT INTO user_budgets (user_id, budget, spend) SELECT $3, delta_cents::numeric / 100, 0 FROM ins ' +
+        'ON CONFLICT (user_id) DO UPDATE SET budget = user_budgets.budget + EXCLUDED.budget, updated_at = NOW() ' +
+        'RETURNING budget, spend ) ' +
+        'SELECT (SELECT count(*) FROM ins) AS applied, ' +
+        'COALESCE((SELECT budget FROM applied), (SELECT budget FROM user_budgets WHERE user_id = $4)) AS budget, ' +
+        'COALESCE((SELECT spend FROM applied), (SELECT spend FROM user_budgets WHERE user_id = $5)) AS spend',
+    );
+    expect(values).toEqual(['pi_1', 'u1', 1000, 'u1', 'u1', 'u1']);
+  });
+
+  it('maps a fresh key to applied:true with the post-increment ledger', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ applied: '1', budget: '60.0000', spend: '50.021400' }]);
+    expect(await incrementUserBudget('u1', 1000, 'pi_1')).toEqual({ applied: true, budget: 60, spend: 50.0214 });
+  });
+
+  it('maps a replayed key to applied:false and still reports the current ledger', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ applied: '0', budget: '60.0000', spend: '50.021400' }]);
+    expect(await incrementUserBudget('u1', 1000, 'pi_1')).toEqual({ applied: false, budget: 60, spend: 50.0214 });
+  });
+
+  it('reports 0/0 for a replay against a user with no budget row', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ applied: '0', budget: null, spend: null }]);
+    expect(await incrementUserBudget('ghost', 1000, 'pi_1')).toEqual({ applied: false, budget: 0, spend: 0 });
+  });
+
+  it('throws on an empty result set and propagates DB errors (the webhook retries)', async () => {
+    mockSqlFn.mockResolvedValueOnce([]);
+    await expect(incrementUserBudget('u1', 1000, 'pi_1')).rejects.toThrow('no rows');
+    mockSqlFn.mockRejectedValueOnce(new Error('connection refused'));
+    await expect(incrementUserBudget('u1', 1000, 'pi_1')).rejects.toThrow('connection refused');
   });
 });
