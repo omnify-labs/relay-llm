@@ -45,6 +45,33 @@ export interface LiteLLMEntry {
   litellm_provider?: string;
   mode?: string;
   deprecation_date?: string;
+  // Reason: LiteLLM adds context/duration tiers ad hoc (`_above_200k_tokens`,
+  // `_above_272k_tokens`, `_above_1hr`, …). The ceiling must see ALL of them, so
+  // pricing.ts scans keys by pattern rather than enumerating suffixes here.
+  [tierField: string]: number | string | undefined;
+}
+
+/**
+ * Every per-token price on an entry for one component, across all tier suffixes.
+ *
+ * @param entry - Raw LiteLLM entry.
+ * @param component - 'input' | 'output' | 'cache_read_input' | 'cache_creation_input'.
+ * @returns All numeric values of `<component>_cost_per_token` and `<component>_cost_per_token_above_*`
+ *   (or `<component>_token_cost`/`_above_*` for the cache fields).
+ */
+export function tierPrices(
+  entry: LiteLLMEntry,
+  component: 'input' | 'output' | 'cache_read_input' | 'cache_creation_input',
+): number[] {
+  const base = component === 'input' || component === 'output'
+    ? `${component}_cost_per_token`
+    : `${component}_token_cost`;
+  const re = new RegExp(`^${base}(_above_\\w+)?$`);
+  const out: number[] = [];
+  for (const [k, v] of Object.entries(entry)) {
+    if (re.test(k) && typeof v === 'number') out.push(v);
+  }
+  return out;
 }
 
 const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>; // Reason: the JSON import infers a deep literal type; `as unknown` widens it to a typed Record without @ts-ignore.

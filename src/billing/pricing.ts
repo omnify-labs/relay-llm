@@ -1,6 +1,9 @@
 import {
   PRICING,
   liveProxiedEntries,
+  lookupRaw,
+  normalizeEntry,
+  tierPrices,
   toMicro,
   type LiteLLMEntry,
   type ModelPricing,
@@ -52,30 +55,16 @@ function maxMicro(...values: bigint[]): bigint {
  *   the integers so the two encodings cannot drift.
  */
 export function buildCeilingPricing(entries: LiteLLMEntry[]): ModelPricing {
-  const inputMicro = maxMicro(
-    CEILING_FLOOR.inputMicro,
-    ...entries.map((e) => saneMicro(e.input_cost_per_token)),
-    ...entries.map((e) => saneMicro(e.input_cost_per_token_above_200k_tokens)),
-  );
-  const outputMicro = maxMicro(
-    CEILING_FLOOR.outputMicro,
-    ...entries.map((e) => saneMicro(e.output_cost_per_token)),
-    ...entries.map((e) => saneMicro(e.output_cost_per_token_above_200k_tokens)),
-  );
+  // Reason: tierPrices() scans every `_above_*` tier LiteLLM ships (200k, 272k, 1hr, …)
+  // so a new tier suffix cannot silently fall outside the ceiling.
+  const maxOf = (component: Parameters<typeof tierPrices>[1]): bigint =>
+    maxMicro(...entries.flatMap((e) => tierPrices(e, component).map(saneMicro)));
+  const inputMicro = maxMicro(CEILING_FLOOR.inputMicro, maxOf('input'));
+  const outputMicro = maxMicro(CEILING_FLOOR.outputMicro, maxOf('output'));
   // Reason: no cache discount for unknown ids — cached reads never bill below the
   // input ceiling.
-  const cachedInputMicro = maxMicro(
-    CEILING_FLOOR.cachedInputMicro,
-    inputMicro,
-    ...entries.map((e) => saneMicro(e.cache_read_input_token_cost)),
-    ...entries.map((e) => saneMicro(e.cache_read_input_token_cost_above_200k_tokens)),
-  );
-  const cacheCreationMicro = maxMicro(
-    CEILING_FLOOR.cacheCreationMicro,
-    inputMicro,
-    ...entries.map((e) => saneMicro(e.cache_creation_input_token_cost)),
-    ...entries.map((e) => saneMicro(e.cache_creation_input_token_cost_above_1hr)),
-  );
+  const cachedInputMicro = maxMicro(CEILING_FLOOR.cachedInputMicro, inputMicro, maxOf('cache_read_input'));
+  const cacheCreationMicro = maxMicro(CEILING_FLOOR.cacheCreationMicro, inputMicro, maxOf('cache_creation_input'));
   return {
     inputMicro, outputMicro, cachedInputMicro, cacheCreationMicro,
     inputPerMillion: Number(inputMicro) / 1e6,
@@ -87,20 +76,29 @@ export function buildCeilingPricing(entries: LiteLLMEntry[]): ModelPricing {
 
 export const CEILING_PRICING: ModelPricing = buildCeilingPricing(liveProxiedEntries().map(([, e]) => e));
 
-// Reason: OpenAI echoes the dated snapshot id (gpt-4o-2024-08-06) for a request that
+// Reason: OpenAI echoes a dated snapshot id (gpt-4o-2024-08-06) for a request that
 // named the bare id (gpt-4o). Without this, EVERY served OpenAI model would fall to the
-// ceiling. LiteLLM prices the snapshot identically to the bare id.
+// ceiling. But a dated id is NOT always priced like its stem — gpt-4o-2024-05-13 is
+// $5/$15 vs gpt-4o's $2.50/$10 — so a snapshot that LiteLLM prices itself is billed
+// from ITS OWN row, and only a snapshot LiteLLM does not know is mapped to the stem.
 const SNAPSHOT_SUFFIX = /-\d{4}-\d{2}-\d{2}$/;
 
 /**
  * Resolve a provider-returned model id to a served pricing row, tolerating dated
- * OpenAI snapshot suffixes.
+ * OpenAI snapshot suffixes without ever under-billing a differently-priced snapshot.
  *
  * @param model - Model id as returned by the provider.
- * @returns The served pricing, or undefined when the id is genuinely unknown.
+ * @returns The pricing to bill at, or undefined when the id is genuinely unknown.
  */
 export function resolveServedPricing(model: string): ModelPricing | undefined {
-  return PRICING[model] ?? PRICING[model.replace(SNAPSHOT_SUFFIX, '')];
+  const exact = PRICING[model];
+  if (exact) return exact;
+  const stem = model.replace(SNAPSHOT_SUFFIX, '');
+  if (stem === model || !PRICING[stem]) return undefined; // not a snapshot of a served model
+  const own = lookupRaw(model);
+  // Reason: the snapshot has its own (possibly different) price — bill that, not the stem's.
+  if (own && own.input_cost_per_token != null) return normalizeEntry(own);
+  return PRICING[stem];
 }
 
 const warnedUnknownModels = new Set<string>();

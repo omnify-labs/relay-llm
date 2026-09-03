@@ -271,6 +271,10 @@ export interface ParsedUsage {
  * - inputTokens always = total prompt tokens (including cached)
  * - Anthropic: input_tokens does NOT include cache tokens, so we add them back
  * - OpenAI/Google: prompt_tokens already includes cached, use as-is
+ *
+ * @param body - Raw (non-streaming) response body text.
+ * @param provider - Upstream provider the request was proxied to (selects the usage schema).
+ * @returns Parsed token usage, or null when the payload carries no usage block.
  */
 export function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage | null {
   try {
@@ -329,6 +333,10 @@ export function parseUsageFromBody(body: string, provider: ProviderName): Parsed
  * Semantic normalization:
  * - inputTokens always = total prompt tokens (including cached)
  * - Anthropic: message_start sets input/cache fields; message_delta only updates outputTokens (cache fields preserved)
+ *
+ * @param sseText - Full accumulated SSE stream text.
+ * @param provider - Upstream provider the request was proxied to (selects the usage schema).
+ * @returns Parsed token usage, or null when the payload carries no usage block.
  */
 export function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage | null {
   const lines = sseText.split('\n');

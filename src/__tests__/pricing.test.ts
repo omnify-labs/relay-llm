@@ -10,6 +10,7 @@ import {
   PRICING,
   liveProxiedEntries,
   isLiveProxiedEntry,
+  tierPrices,
   toMicro,
   type LiteLLMEntry,
   type ModelPricing,
@@ -292,9 +293,12 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
       expect(cap(e.cache_creation_input_token_cost), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
       expect(cap(e.cache_creation_input_token_cost_above_1hr), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
     }
-    // The pro-tier Responses models are live and drive the ceiling well above the floor.
-    expect(CEILING_PRICING.inputMicro).toBeGreaterThanOrEqual(150_000_000n);
-    expect(CEILING_PRICING.outputMicro).toBeGreaterThanOrEqual(600_000_000n);
+    // Reason: no magic numbers — the driver models deprecate (o1-pro on 2026-10-23), so
+    // the bound is derived from the live entries the ceiling is built from.
+    const liveMax = (component: Parameters<typeof tierPrices>[1]) =>
+      live.reduce((m, [, e]) => tierPrices(e, component).reduce((mm, v) => (v <= 0.005 && toMicro(v) > mm ? toMicro(v) : mm), m), 0n);
+    expect(CEILING_PRICING.inputMicro).toBe(liveMax('input') > 30_000_000n ? liveMax('input') : 30_000_000n);
+    expect(CEILING_PRICING.outputMicro).toBe(liveMax('output') > 120_000_000n ? liveMax('output') : 120_000_000n);
     // Every served model is (trivially) at or below the ceiling too.
     for (const [m, p] of Object.entries(PRICING)) {
       expect(p.inputMicro, m).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
@@ -310,12 +314,14 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
       { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6, cache_read_input_token_cost: 1e-7, cache_creation_input_token_cost: 1.25e-6 },
       { input_cost_per_token: 5e-6, input_cost_per_token_above_200k_tokens: 9e-4, output_cost_per_token: 1e-5, output_cost_per_token_above_200k_tokens: 2e-3 },
       { cache_read_input_token_cost_above_200k_tokens: 8e-4, cache_creation_input_token_cost_above_1hr: 3e-3 },
+      // A tier suffix we never enumerated (LiteLLM adds these ad hoc) must still count.
+      { input_cost_per_token_above_272k_tokens: 1.1e-3 },
     ];
     const c = buildCeilingPricing(entries);
-    expect(c.inputMicro).toBe(900_000_000n); // above-200k input dominates
+    expect(c.inputMicro).toBe(1_100_000_000n); // the un-enumerated 272k tier dominates
     expect(c.outputMicro).toBe(2_000_000_000n); // above-200k output dominates
     // cached read: max(field maxes, input ceiling) — no discount for unknown ids
-    expect(c.cachedInputMicro).toBe(900_000_000n);
+    expect(c.cachedInputMicro).toBe(1_100_000_000n);
     // cache write: 1h tier (3e-3) dominates everything
     expect(c.cacheCreationMicro).toBe(3_000_000_000n);
   });
@@ -344,7 +350,7 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     expect(isLiveProxiedEntry({ ...base, deprecation_date: '2026-09-03' }, '2026-09-02')).toBe(true);
   });
 
-  it('resolves OpenAI dated snapshot ids to the served bare id (never the ceiling)', () => {
+  it('bills OpenAI dated snapshot ids at the served price (own row when LiteLLM has one), never the ceiling', () => {
     // Reason: OpenAI echoes e.g. gpt-4o-2024-08-06 for a gpt-4o request. Without
     // normalization every served OpenAI model would be billed at the ceiling.
     for (const [dated, bare] of [
@@ -354,11 +360,25 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
       ['gpt-5.4-2026-03-05', 'gpt-5.4'],
     ] as const) {
       expect(PRICING[bare], bare).toBeDefined();
-      expect(resolveServedPricing(dated), dated).toBe(PRICING[bare]);
+      expect(resolveServedPricing(dated), dated).toEqual(PRICING[bare]);
       expect(calculateCostMicroUsd(dated, 1000, 500, 0, 0)).toBe(calculateCostMicroUsd(bare, 1000, 500, 0, 0));
     }
     expect(resolveServedPricing('totally-unknown-2026-01-01')).toBeUndefined();
     expect(resolveServedPricing('gpt-4o-not-a-date')).toBeUndefined();
+  });
+
+  it('bills a differently-priced snapshot from ITS OWN row, never the cheaper stem', () => {
+    // Reason: gpt-4o-2024-05-13 is a live $5/$15 model; mapping it to gpt-4o ($2.50/$10)
+    // would be a silent 37.5% under-bill — the exact failure the ceiling exists to prevent.
+    const own = resolveServedPricing('gpt-4o-2024-05-13');
+    expect(own).toBeDefined();
+    expect(own!.inputMicro).toBe(5_000_000n);
+    expect(own!.outputMicro).toBe(15_000_000n);
+    expect(own).not.toBe(PRICING['gpt-4o']);
+    const cost = calculateCostMicroUsd('gpt-4o-2024-05-13', 1_000_000, 1_000_000, 0, 0);
+    expect(cost).toBe(20_000_000n); // $20, not gpt-4o's $12.50
+    // A snapshot LiteLLM does not know (client-synthesized) maps to the served stem.
+    expect(resolveServedPricing('gpt-4o-2099-01-01')).toBe(PRICING['gpt-4o']);
   });
 
   it('keeps the ceiling float and micro encodings in agreement', () => {
