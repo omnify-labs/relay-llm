@@ -121,34 +121,28 @@ const PROXIED_PROVIDERS = new Set(['openai', 'anthropic', 'gemini', 'vertex_ai-l
 const BILLABLE_MODES = new Set(['chat', 'responses']);
 
 /**
- * Whether an entry is a model a client could plausibly name through relay today:
- * a proxied provider, a chat/responses model, and not past its deprecation date.
+ * Whether an entry is a model a client could name through relay: a proxied provider
+ * and a chat/responses model. Deprecation dates are deliberately ignored — LiteLLM's
+ * date is not the provider's real shutdown, and a row past it can only RAISE the
+ * ceiling, so excluding it would let the ceiling sink below a price still charged.
  *
  * @param entry - Raw LiteLLM entry.
- * @param today - ISO date (YYYY-MM-DD) to evaluate deprecation against; injectable for tests.
- * @returns True when the entry should bound the ceiling price for unknown ids.
+ * @returns True when the entry may be billed from its own row and bounds the ceiling.
  */
-export function isLiveProxiedEntry(entry: LiteLLMEntry, today: string): boolean {
-  return (
-    PROXIED_PROVIDERS.has(entry.litellm_provider ?? '') &&
-    BILLABLE_MODES.has(entry.mode ?? '') &&
-    (!entry.deprecation_date || entry.deprecation_date > today)
-  );
+export function isProxiedEntry(entry: LiteLLMEntry): boolean {
+  return PROXIED_PROVIDERS.has(entry.litellm_provider ?? '') && BILLABLE_MODES.has(entry.mode ?? '');
 }
 
 /**
- * Every live proxied entry in the vendored table (NOT just served models). Feeds the
+ * Every proxied entry in the vendored table (NOT just served models). Feeds the
  * ceiling for unknown ids: the proxy forwards any model a client names, so the ceiling
- * must cover the most expensive thing a provider will actually serve, not the most
+ * must cover the most expensive thing a provider has ever sold, not the most
  * expensive thing we chose to list.
  *
- * @param today - ISO date for the deprecation check; defaults to now.
  * @returns Raw entries with their LiteLLM keys.
  */
-export function liveProxiedEntries(
-  today: string = new Date().toISOString().slice(0, 10),
-): Array<[string, LiteLLMEntry]> {
-  return Object.entries(RAW).filter(([, e]) => isLiveProxiedEntry(e, today));
+export function proxiedEntries(): Array<[string, LiteLLMEntry]> {
+  return Object.entries(RAW).filter(([, e]) => isProxiedEntry(e));
 }
 
 /** relay model id -> LiteLLM key, for the few that don't match exactly. */
@@ -178,15 +172,20 @@ export function toMicro(perToken: number | undefined): bigint {
  * @returns ModelPricing with all rates converted from per-token to per-million.
  */
 export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
+  // Reason: a row with no cache price means the provider does not discount (or does
+  // not support) caching for that model. Should the provider report cached tokens
+  // anyway, they bill at the input rate — never at the $0 a missing field would imply.
+  const cacheRead = entry.cache_read_input_token_cost ?? entry.input_cost_per_token;
+  const cacheCreation = entry.cache_creation_input_token_cost ?? entry.input_cost_per_token;
   const pricing: ModelPricing = {
     inputPerMillion: toMillion(entry.input_cost_per_token),
     outputPerMillion: toMillion(entry.output_cost_per_token),
-    cachedInputPerMillion: toMillion(entry.cache_read_input_token_cost),
-    cacheCreationPerMillion: toMillion(entry.cache_creation_input_token_cost),
+    cachedInputPerMillion: toMillion(cacheRead),
+    cacheCreationPerMillion: toMillion(cacheCreation),
     inputMicro: toMicro(entry.input_cost_per_token),
     outputMicro: toMicro(entry.output_cost_per_token),
-    cachedInputMicro: toMicro(entry.cache_read_input_token_cost),
-    cacheCreationMicro: toMicro(entry.cache_creation_input_token_cost),
+    cachedInputMicro: toMicro(cacheRead),
+    cacheCreationMicro: toMicro(cacheCreation),
   };
   if (entry.input_cost_per_token_above_200k_tokens != null) {
     pricing.inputPerMillionAbove200k = toMillion(entry.input_cost_per_token_above_200k_tokens);

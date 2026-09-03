@@ -69,10 +69,11 @@ describe('litellm-pricing', () => {
     expect(p.cachedInputMicro).toBe(75_000n);
   });
 
-  it('maps absent price fields to 0n micro rates and omits above-200k micro fields', () => {
+  it('maps an absent output price to 0n, absent cache prices to the INPUT rate, and omits above-200k fields', () => {
     const p = normalizeEntry({ input_cost_per_token: 2e-6 });
     expect(p.outputMicro).toBe(0n);
-    expect(p.cacheCreationMicro).toBe(0n);
+    expect(p.cachedInputMicro).toBe(2_000_000n);
+    expect(p.cacheCreationMicro).toBe(2_000_000n);
     expect(p.inputMicroAbove200k).toBeUndefined();
   });
 

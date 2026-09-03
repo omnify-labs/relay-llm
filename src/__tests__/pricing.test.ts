@@ -8,8 +8,8 @@ import {
 } from '../billing/pricing.js';
 import {
   PRICING,
-  liveProxiedEntries,
-  isLiveProxiedEntry,
+  proxiedEntries,
+  isProxiedEntry,
   tierPrices,
   toMicro,
   type LiteLLMEntry,
@@ -85,7 +85,8 @@ describe('calculateCost', () => {
     expect(p.inputPerMillion).toBeCloseTo(0.75, 6);
     expect(p.outputPerMillion).toBeCloseTo(3.75, 6);
     expect(p.cachedInputPerMillion).toBeCloseTo(0.075, 6);
-    expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
+    // No cache-write price in the table → billed at the input rate, never $0.
+    expect(p.cacheCreationPerMillion).toBeCloseTo(p.inputPerMillion, 6);
   });
 
   it('gemini-3.6-flash resolves to real rates, with a non-zero cache read', () => {
@@ -101,7 +102,8 @@ describe('calculateCost', () => {
     expect(p.inputPerMillion).toBeCloseTo(0.75, 6);
     expect(p.outputPerMillion).toBeCloseTo(3.75, 6);
     expect(p.cachedInputPerMillion).toBeCloseTo(0.075, 6);
-    expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
+    // No cache-write price in the table → billed at the input rate, never $0.
+    expect(p.cacheCreationPerMillion).toBeCloseTo(p.inputPerMillion, 6);
   });
 
   it('applies gemini-3.5-flash-lite cached input discount (90% off)', () => {
@@ -277,11 +279,11 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     expect(calculateCostMicroUsd('unknown-model-xyz', 1000, 500, 0, 0)).toBe(exp);
   });
 
-  it('ceiling is >= every component of every LIVE proxied entry in the vendored table', () => {
+  it('ceiling is >= every component of every proxied entry in the vendored table, deprecated included', () => {
     // Reason: the proxy forwards any model a client names, so the ceiling must cover
-    // the most expensive thing the providers actually sell (o1-pro-class), not just
+    // the most expensive thing the providers have ever sold (o1-pro-class), not just
     // the served list. Computed independently from the raw entries here.
-    const live = liveProxiedEntries();
+    const live = proxiedEntries();
     expect(live.length).toBeGreaterThan(50); // sanity: the table is populated
     const cap = (v: number | undefined) => (v && v <= 0.005 ? toMicro(v) : 0n);
     for (const [key, e] of live) {
@@ -293,8 +295,9 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
       expect(cap(e.cache_creation_input_token_cost), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
       expect(cap(e.cache_creation_input_token_cost_above_1hr), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
     }
-    // Reason: no magic numbers — the driver models deprecate (o1-pro on 2026-10-23), so
-    // the bound is derived from the live entries the ceiling is built from.
+    // Reason: no magic numbers — the bound is derived from the same entries the
+    // ceiling is built from, and a row past its LiteLLM deprecation date still counts
+    // (so the ceiling can only ever rise when the table is refreshed).
     const liveMax = (component: Parameters<typeof tierPrices>[1]) =>
       live.reduce((m, [, e]) => tierPrices(e, component).reduce((mm, v) => (v <= 0.005 && toMicro(v) > mm ? toMicro(v) : mm), m), 0n);
     expect(CEILING_PRICING.inputMicro).toBe(liveMax('input') > 30_000_000n ? liveMax('input') : 30_000_000n);
@@ -339,15 +342,36 @@ describe('calculateCostMicroUsd (integer billing path)', () => {
     expect(c0.cacheCreationMicro).toBe(37_500_000n);
   });
 
-  it('isLiveProxiedEntry admits only live chat/responses rows of proxied providers', () => {
+  it('isProxiedEntry admits chat/responses rows of proxied providers and ignores deprecation dates', () => {
     const base: LiteLLMEntry = { input_cost_per_token: 1e-6, litellm_provider: 'openai', mode: 'chat' };
-    expect(isLiveProxiedEntry(base, '2026-09-02')).toBe(true);
-    expect(isLiveProxiedEntry({ ...base, mode: 'responses' }, '2026-09-02')).toBe(true);
-    expect(isLiveProxiedEntry({ ...base, litellm_provider: 'vertex_ai-language-models' }, '2026-09-02')).toBe(true);
-    expect(isLiveProxiedEntry({ ...base, litellm_provider: 'bedrock' }, '2026-09-02')).toBe(false);
-    expect(isLiveProxiedEntry({ ...base, mode: 'embedding' }, '2026-09-02')).toBe(false);
-    expect(isLiveProxiedEntry({ ...base, deprecation_date: '2026-09-01' }, '2026-09-02')).toBe(false);
-    expect(isLiveProxiedEntry({ ...base, deprecation_date: '2026-09-03' }, '2026-09-02')).toBe(true);
+    expect(isProxiedEntry(base)).toBe(true);
+    expect(isProxiedEntry({ ...base, mode: 'responses' })).toBe(true);
+    expect(isProxiedEntry({ ...base, litellm_provider: 'vertex_ai-language-models' })).toBe(true);
+    expect(isProxiedEntry({ ...base, litellm_provider: 'bedrock' })).toBe(false);
+    expect(isProxiedEntry({ ...base, mode: 'embedding' })).toBe(false);
+    // A deprecated row can only raise the ceiling; dropping it on a date would let the
+    // ceiling sink below a price the provider may still charge.
+    expect(isProxiedEntry({ ...base, deprecation_date: '2000-01-01' })).toBe(true);
+  });
+
+  it('bills Anthropic -YYYYMMDD snapshot ids from their own row, never the ceiling', () => {
+    // Reason: Anthropic echoes claude-sonnet-4-5-20250929 for a claude-sonnet-4-5 request.
+    // The OpenAI-style date regex never matched, so these fell to the $150/$600 ceiling —
+    // a 50× over-bill against the fail-close budget.
+    const own = resolveServedPricing('claude-sonnet-4-5-20250929');
+    expect(own).toBeDefined();
+    expect(own!.inputMicro).toBe(3_000_000n);
+    expect(own!.outputMicro).toBe(15_000_000n);
+    expect(own).not.toEqual(CEILING_PRICING);
+  });
+
+  it('bills cached tokens at the input rate when a snapshot row carries no cache price', () => {
+    // Reason: gpt-4o-2024-05-13 has no cache_read_input_token_cost in LiteLLM. A missing
+    // field must never become a $0 cached rate — that is the silent under-bill this
+    // whole PR exists to prevent.
+    const own = resolveServedPricing('gpt-4o-2024-05-13')!;
+    expect(own.cachedInputMicro).toBe(own.inputMicro);
+    expect(calculateCostMicroUsd('gpt-4o-2024-05-13', 100_000, 0, 90_000, 0)).toBe(500_000n); // $0.50, no discount
   });
 
   it('bills OpenAI dated snapshot ids at the served price (own row when LiteLLM has one), never the ceiling', () => {

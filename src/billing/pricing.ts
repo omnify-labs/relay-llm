@@ -1,7 +1,8 @@
 import {
   PRICING,
-  liveProxiedEntries,
+  isProxiedEntry,
   lookupRaw,
+  proxiedEntries,
   normalizeEntry,
   tierPrices,
   toMicro,
@@ -50,7 +51,7 @@ function maxMicro(...values: bigint[]): bigint {
 /**
  * Build the ceiling from the live proxied entries.
  *
- * @param entries - Raw LiteLLM entries to bound by (see liveProxiedEntries).
+ * @param entries - Raw LiteLLM entries to bound by (see proxiedEntries).
  * @returns Per-component max, floored by CEILING_FLOOR, with float fields derived from
  *   the integers so the two encodings cannot drift.
  */
@@ -74,31 +75,30 @@ export function buildCeilingPricing(entries: LiteLLMEntry[]): ModelPricing {
   };
 }
 
-export const CEILING_PRICING: ModelPricing = buildCeilingPricing(liveProxiedEntries().map(([, e]) => e));
+export const CEILING_PRICING: ModelPricing = buildCeilingPricing(proxiedEntries().map(([, e]) => e));
 
-// Reason: OpenAI echoes a dated snapshot id (gpt-4o-2024-08-06) for a request that
-// named the bare id (gpt-4o). Without this, EVERY served OpenAI model would fall to the
-// ceiling. But a dated id is NOT always priced like its stem — gpt-4o-2024-05-13 is
-// $5/$15 vs gpt-4o's $2.50/$10 — so a snapshot that LiteLLM prices itself is billed
-// from ITS OWN row, and only a snapshot LiteLLM does not know is mapped to the stem.
+// Reason: providers echo a dated snapshot id (gpt-4o-2024-08-06, claude-sonnet-4-5-20250929)
+// for a request that named the bare id. Any id LiteLLM prices for a proxied provider
+// bills from ITS OWN row — that is the provider's real price, and not always the
+// stem's (gpt-4o-2024-05-13 is $5/$15 vs gpt-4o's $2.50/$10). Only an OpenAI-style
+// dated snapshot LiteLLM does not know maps to its served stem; everything else
+// unknown falls to the ceiling.
 const SNAPSHOT_SUFFIX = /-\d{4}-\d{2}-\d{2}$/;
 
 /**
- * Resolve a provider-returned model id to a served pricing row, tolerating dated
- * OpenAI snapshot suffixes without ever under-billing a differently-priced snapshot.
+ * Resolve a provider-returned model id to the pricing to bill at.
  *
  * @param model - Model id as returned by the provider.
- * @returns The pricing to bill at, or undefined when the id is genuinely unknown.
+ * @returns The served row, the id's own LiteLLM row, or its served stem's row; undefined
+ *   when the id is genuinely unknown (the caller bills the ceiling).
  */
 export function resolveServedPricing(model: string): ModelPricing | undefined {
   const exact = PRICING[model];
   if (exact) return exact;
-  const stem = model.replace(SNAPSHOT_SUFFIX, '');
-  if (stem === model || !PRICING[stem]) return undefined; // not a snapshot of a served model
   const own = lookupRaw(model);
-  // Reason: the snapshot has its own (possibly different) price — bill that, not the stem's.
-  if (own && own.input_cost_per_token != null) return normalizeEntry(own);
-  return PRICING[stem];
+  if (own && isProxiedEntry(own) && own.input_cost_per_token != null) return normalizeEntry(own);
+  const stem = model.replace(SNAPSHOT_SUFFIX, '');
+  return stem !== model ? PRICING[stem] : undefined;
 }
 
 const warnedUnknownModels = new Set<string>();

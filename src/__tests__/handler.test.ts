@@ -240,7 +240,15 @@ describe('OpenAI Responses API usage shape', () => {
   it('still parses the Chat Completions shape (prompt_tokens wins when both present)', () => {
     const body = JSON.stringify({
       model: 'gpt-4o-2024-08-06',
-      usage: { prompt_tokens: 50, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 10 } },
+      usage: {
+        prompt_tokens: 50,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 10 },
+        // Responses-shaped fields present too: the Chat fields must win.
+        input_tokens: 999,
+        output_tokens: 999,
+        input_tokens_details: { cached_tokens: 999 },
+      },
     });
     expect(parseUsageFromBody(body, 'openai')).toMatchObject({
       model: 'gpt-4o-2024-08-06',
