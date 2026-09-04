@@ -109,12 +109,21 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
 }
 
 /**
- * Set or create a user's budget. Optionally reset spend to 0.
- * Uses upsert — creates the record if it doesn't exist.
+ * Set a user's PLAN budget, keeping their purchased credit on top of it.
+ *
+ * `budget` is the plan base (tier allocation, free floor, or 0 on revocation), stored
+ * in its own column `plan_base`. The materialised ceiling `budget` is always
+ * `plan_base + remaining purchased credit`, so an absolute plan write from any caller
+ * (renewal, tier change, cancellation, trial expiry) can never wipe credit the user
+ * paid for. With `resetSpend`, the spend that exceeded the previous base is first drawn
+ * down FIFO from the purchases (the money it was actually spent from), then spend
+ * restarts at 0. Runs in a transaction that locks the row before touching the ledger,
+ * so a purchase landing concurrently is neither lost nor double-counted, and the base
+ * is read from `plan_base` rather than derived from the mutable `budget`.
  *
  * @param userId - User ID
- * @param budget - Budget ceiling in USD
- * @param resetSpend - If true, resets spend to 0 (for subscription renewal)
+ * @param budget - Plan base in USD (purchased credit is added on top)
+ * @param resetSpend - Start a new cycle: draw down purchases by the over-base spend, zero spend
  * @returns True if the record was created or updated
  */
 export async function setUserBudget(
@@ -123,25 +132,123 @@ export async function setUserBudget(
   resetSpend: boolean,
 ): Promise<boolean> {
   const sql = getDb();
-  if (resetSpend) {
-    const result = await sql`
-      INSERT INTO user_budgets (user_id, budget, spend)
-      VALUES (${userId}, ${budget}, 0)
+  // A transaction, not a single statement: we lock the row FIRST (FOR UPDATE, its own
+  // statement) so no concurrent budget/increment can commit between our read of the
+  // purchase ledger and our absolute rewrite of `budget`. The base lives in its own
+  // column `plan_base` and is read directly — NEVER derived from the mutable `budget`
+  // — so the reset draw-down cannot be corrupted by a purchase that landed in the gap.
+  return sql.begin(async (tx) => {
+    // Guarantee the row before locking: SELECT ... FOR UPDATE locks nothing when the
+    // row does not exist yet, so a first-ever write (a purchase creating the row, or a
+    // re-provision after DELETE) could still race. This insert makes the row exist so
+    // the FOR UPDATE below actually serializes a concurrent increment.
+    await tx`INSERT INTO user_budgets (user_id) VALUES (${userId}) ON CONFLICT (user_id) DO NOTHING`;
+    await tx`SELECT plan_base FROM user_budgets WHERE user_id = ${userId} FOR UPDATE`;
+    if (resetSpend) {
+      // Draw the spend that exceeded the CURRENT plan base down from purchases FIFO
+      // (flooring in the user's favour), then start a fresh cycle. plan_base comes from
+      // the locked row; budget is re-materialised as base + remaining purchased credit.
+      const result = await tx`
+        WITH cur AS (
+          SELECT plan_base, spend FROM user_budgets WHERE user_id = ${userId}
+        ),
+        consumed AS (
+          SELECT GREATEST(0, floor(
+            (COALESCE((SELECT spend FROM cur), 0) - COALESCE((SELECT plan_base FROM cur), 0)) * 100
+          ))::bigint AS cents
+        ),
+        purchased AS (
+          SELECT idempotency_key, remaining_cents,
+            COALESCE(SUM(remaining_cents) OVER (ORDER BY created_at, idempotency_key ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS prior_cents
+          FROM budget_increments WHERE user_id = ${userId} AND remaining_cents > 0
+        ),
+        drawn AS (
+          UPDATE budget_increments b
+          SET remaining_cents = b.remaining_cents - LEAST(b.remaining_cents, GREATEST(0, c.cents - p.prior_cents))::int
+          FROM purchased p, consumed c
+          WHERE b.idempotency_key = p.idempotency_key
+          RETURNING b.remaining_cents
+        ),
+        upsert AS (
+          INSERT INTO user_budgets (user_id, plan_base, budget, spend)
+          VALUES (${userId}, ${budget}, ${budget}::numeric + (SELECT COALESCE(SUM(remaining_cents), 0) FROM drawn) / 100.0, 0)
+          ON CONFLICT (user_id) DO UPDATE
+          SET plan_base = EXCLUDED.plan_base, budget = EXCLUDED.budget, spend = 0, updated_at = NOW()
+          RETURNING user_id
+        )
+        SELECT user_id FROM upsert
+      `;
+      return result.length > 0;
+    }
+    const result = await tx`
+      INSERT INTO user_budgets (user_id, plan_base, budget)
+      VALUES (${userId}, ${budget}, ${budget}::numeric + (SELECT COALESCE(SUM(remaining_cents), 0) FROM budget_increments WHERE user_id = ${userId}) / 100.0)
       ON CONFLICT (user_id) DO UPDATE
-      SET budget = ${budget}, spend = 0, updated_at = NOW()
+      SET plan_base = EXCLUDED.plan_base, budget = EXCLUDED.budget, updated_at = NOW()
       RETURNING user_id
     `;
     return result.length > 0;
-  } else {
-    const result = await sql`
-      INSERT INTO user_budgets (user_id, budget)
-      VALUES (${userId}, ${budget})
+  });
+}
+
+
+/** Post-increment ledger state, plus whether THIS call applied the delta. */
+export interface BudgetIncrementResult {
+  /** False when the idempotency key had already been applied (a replay). */
+  applied: boolean;
+  budget: number;
+  spend: number;
+}
+
+/**
+ * Raise a user's budget by an integer number of cents, exactly once per
+ * idempotency key (a purchase's Stripe payment_intent).
+ *
+ * One statement: the key is claimed in budget_increments (`ON CONFLICT DO NOTHING`)
+ * and the user_budgets upsert is fed FROM that claim, so a replayed key inserts
+ * nothing, adds nothing, and still returns the current ledger — the caller (a
+ * Stripe webhook that will be redelivered) can retry freely. Cents become dollars
+ * once, inside SQL, so no float ever carries the amount. A user with no budget row
+ * gets one holding just the delta. The purchase's remaining_cents starts full; the
+ * plan-budget reset in setUserBudget draws it down as it is spent.
+ *
+ * @param userId - User whose budget grows.
+ * @param deltaCents - Positive integer cents to add.
+ * @param idempotencyKey - Unique per purchase; a repeat is a no-op.
+ * @returns Post-increment budget/spend and whether this call applied the delta.
+ */
+export async function incrementUserBudget(
+  userId: string,
+  deltaCents: number,
+  idempotencyKey: string,
+): Promise<BudgetIncrementResult> {
+  const sql = getDb();
+  const rows = await sql`
+    WITH ins AS (
+      INSERT INTO budget_increments (idempotency_key, user_id, delta_cents, remaining_cents)
+      VALUES (${idempotencyKey}, ${userId}, ${deltaCents}, ${deltaCents})
+      ON CONFLICT (idempotency_key) DO NOTHING
+      RETURNING delta_cents
+    ),
+    applied AS (
+      INSERT INTO user_budgets (user_id, plan_base, budget, spend)
+      SELECT ${userId}, 0, delta_cents::numeric / 100, 0 FROM ins
       ON CONFLICT (user_id) DO UPDATE
-      SET budget = ${budget}, updated_at = NOW()
-      RETURNING user_id
-    `;
-    return result.length > 0;
-  }
+      SET budget = user_budgets.budget + EXCLUDED.budget, updated_at = NOW()
+      RETURNING budget, spend
+    )
+    SELECT
+      (SELECT count(*) FROM ins) AS applied,
+      COALESCE((SELECT budget FROM applied), (SELECT budget FROM user_budgets WHERE user_id = ${userId})) AS budget,
+      COALESCE((SELECT spend FROM applied), (SELECT spend FROM user_budgets WHERE user_id = ${userId})) AS spend
+  `;
+  const row = rows[0];
+  if (!row) throw new Error('incrementUserBudget returned no rows');
+  return {
+    applied: Number(row.applied) > 0,
+    budget: parseFloat(row.budget) || 0,
+    spend: parseFloat(row.spend) || 0,
+  };
 }
 
 /**

@@ -139,3 +139,59 @@ ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NO
 -- Applied to the production Supabase on 2026-09-03 (index VALID, 430,395 rows).
 ALTER TABLE usage_logs ALTER COLUMN request_id SET NOT NULL;
 CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);
+
+-- Purchased credit (2026-09-03)
+-- budget_increments is the purchased-credit ledger, one row per purchase:
+--   * idempotency for POST /admin/users/:id/budget/increment — idempotency_key is
+--     the Stripe payment_intent; the endpoint claims the key and upserts user_budgets
+--     in ONE statement (upsert fed from the claim), so a redelivered webhook adds
+--     nothing twice and can retry until acknowledged;
+--   * remaining_cents is what is left of that purchase. Purchased credit never
+--     expires: user_budgets.budget is ALWAYS plan base + SUM(remaining_cents)/100,
+--     which PUT /budget maintains on every plan write, and a cycle reset first draws
+--     the over-base spend down from purchases FIFO. Purchases survive DELETE /users/:id
+--     (a re-provisioned row picks them back up).
+-- Additive: create BEFORE merging the endpoint (merging to main deploys).
+-- Applied to the production Supabase on 2026-09-03 (table, column, grant).
+CREATE TABLE IF NOT EXISTS budget_increments (
+  idempotency_key TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  delta_cents INTEGER NOT NULL CHECK (delta_cents > 0),
+  remaining_cents INTEGER NOT NULL DEFAULT 0 CHECK (remaining_cents >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE budget_increments ADD COLUMN IF NOT EXISTS remaining_cents INTEGER NOT NULL DEFAULT 0 CHECK (remaining_cents >= 0);
+CREATE INDEX IF NOT EXISTS idx_budget_increments_user_id ON budget_increments(user_id, created_at DESC);
+-- Same PostgREST hardening as the other ledger tables (relay bypasses RLS as owner).
+-- The dassi edge functions (service_role) read remaining_cents to display it.
+ALTER TABLE budget_increments ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON budget_increments FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON budget_increments FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT SELECT ON budget_increments TO service_role;
+  END IF;
+END $$;
+
+-- Plan base column (2026-09-03) — decouple the base from the materialised ceiling.
+-- user_budgets.budget is ALWAYS plan_base + SUM(budget_increments.remaining_cents)/100.
+-- The base is now stored on its own so a cycle reset reads it directly instead of
+-- deriving it as `budget - SUM(remaining)` — a value a concurrent purchase mutates.
+-- Deriving it caused a purchase landing during a reset to be permanently lost (the
+-- reset overwrote budget from a stale snapshot, and every later reset then mis-derived
+-- the base too low and over-drew the purchase). setUserBudget now runs in a
+-- transaction that locks the row (SELECT ... FOR UPDATE) before touching the ledger.
+-- Backfill: at rollout there are no purchases, so plan_base = budget; the general form
+-- subtracts any purchased remainder and is idempotent (budget already includes it).
+-- Additive: apply BEFORE merging the code that reads/writes plan_base.
+ALTER TABLE user_budgets ADD COLUMN IF NOT EXISTS plan_base NUMERIC(10,4) NOT NULL DEFAULT 0;
+UPDATE user_budgets ub
+   SET plan_base = ub.budget
+     - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0
+ WHERE ub.plan_base IS DISTINCT FROM
+     ub.budget - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0;
