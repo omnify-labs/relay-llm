@@ -177,3 +177,21 @@ BEGIN
     GRANT SELECT ON budget_increments TO service_role;
   END IF;
 END $$;
+
+-- Plan base column (2026-09-03) — decouple the base from the materialised ceiling.
+-- user_budgets.budget is ALWAYS plan_base + SUM(budget_increments.remaining_cents)/100.
+-- The base is now stored on its own so a cycle reset reads it directly instead of
+-- deriving it as `budget - SUM(remaining)` — a value a concurrent purchase mutates.
+-- Deriving it caused a purchase landing during a reset to be permanently lost (the
+-- reset overwrote budget from a stale snapshot, and every later reset then mis-derived
+-- the base too low and over-drew the purchase). setUserBudget now runs in a
+-- transaction that locks the row (SELECT ... FOR UPDATE) before touching the ledger.
+-- Backfill: at rollout there are no purchases, so plan_base = budget; the general form
+-- subtracts any purchased remainder and is idempotent (budget already includes it).
+-- Additive: apply BEFORE merging the code that reads/writes plan_base.
+ALTER TABLE user_budgets ADD COLUMN IF NOT EXISTS plan_base NUMERIC(10,4) NOT NULL DEFAULT 0;
+UPDATE user_budgets ub
+   SET plan_base = ub.budget
+     - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0
+ WHERE ub.plan_base IS DISTINCT FROM
+     ub.budget - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0;

@@ -8,6 +8,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Reason: postgres.js uses tagged template literals (sql`...`). We mock getDb()
 // to return a function that captures call count and returns configurable results.
 const mockSqlFn = vi.fn();
+// setUserBudget runs inside sql.begin(async (tx) => ...). The tx is itself a tagged
+// template; we record its statements and feed configurable results, so tests can assert
+// the lock + the ledger writes issued inside the transaction.
+const txCalls: unknown[][] = [];
+let txResults: unknown[][] = [];
+function txTag(strings: TemplateStringsArray, ...values: unknown[]) {
+  txCalls.push([strings, ...values]);
+  return Promise.resolve(txResults.shift() ?? []);
+}
+// deno-lint irrelevant; vitest/TS: attach begin to the mock fn object.
+(mockSqlFn as unknown as { begin: unknown }).begin = (cb: (tx: typeof txTag) => unknown) =>
+  Promise.resolve(cb(txTag));
 vi.mock('../db/client.js', () => ({
   getDb: () => mockSqlFn,
 }));
@@ -23,6 +35,10 @@ import {
 
 beforeEach(() => {
   mockSqlFn.mockReset();
+  (mockSqlFn as unknown as { begin: unknown }).begin = (cb: (tx: typeof txTag) => unknown) =>
+    Promise.resolve(cb(txTag));
+  txCalls.length = 0;
+  txResults = [];
 });
 
 /**
@@ -42,74 +58,61 @@ function reconstructSql(call: unknown[]): { sql: string; values: unknown[] } {
   return { sql, values };
 }
 
-describe('setUserBudget', () => {
-  it('returns true on successful upsert (resetSpend: false)', async () => {
-    mockSqlFn.mockResolvedValueOnce([{ user_id: 'u1' }]);
-    const result = await setUserBudget('u1', 10, false);
+describe('setUserBudget (plan_base is the base of record; a locked transaction rematerialises the ceiling)', () => {
+  it('locks the row FIRST, then writes plan_base + budget = base + remaining, spend untouched (resetSpend:false)', async () => {
+    txResults = [[{ plan_base: '10' }], [{ user_id: 'u1' }]];
+    const result = await setUserBudget('u1', 200, false);
     expect(result).toBe(true);
-    expect(mockSqlFn).toHaveBeenCalledTimes(1);
-  });
+    expect(txCalls).toHaveLength(2);
 
-  it('returns true on successful upsert (resetSpend: true)', async () => {
-    mockSqlFn.mockResolvedValueOnce([{ user_id: 'u1' }]);
-    const result = await setUserBudget('u1', 25, true);
-    expect(result).toBe(true);
-    expect(mockSqlFn).toHaveBeenCalledTimes(1);
-  });
+    const lock = reconstructSql(txCalls[0]);
+    expect(lock.sql).toBe('SELECT plan_base FROM user_budgets WHERE user_id = $0 FOR UPDATE');
+    expect(lock.values).toEqual(['u1']);
 
-  it('resetSpend:false — ONE statement writing base + remaining purchased credit, spend untouched', async () => {
-    mockSqlFn.mockResolvedValueOnce([{ user_id: 'u1' }]);
-    await setUserBudget('u1', 200, false);
-    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
-    expect(sql).toBe(
-      'INSERT INTO user_budgets (user_id, budget) VALUES ($0, $1::numeric + ' +
-        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM budget_increments WHERE user_id = $2) / 100.0) ' +
-        'ON CONFLICT (user_id) DO UPDATE SET budget = EXCLUDED.budget, updated_at = NOW() RETURNING user_id',
+    const write = reconstructSql(txCalls[1]);
+    expect(write.sql).toBe(
+      'INSERT INTO user_budgets (user_id, plan_base, budget) VALUES ($0, $1, $2::numeric + ' +
+        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM budget_increments WHERE user_id = $3) / 100.0) ' +
+        'ON CONFLICT (user_id) DO UPDATE SET plan_base = EXCLUDED.plan_base, budget = EXCLUDED.budget, ' +
+        'updated_at = NOW() RETURNING user_id',
     );
-    expect(values).toEqual(['u1', 200, 'u1']);
+    expect(write.values).toEqual(['u1', 200, 200, 'u1']);
   });
 
-  it('resetSpend:true — ONE statement: FIFO draw-down of over-base spend, then base + remaining, spend = 0', async () => {
-    mockSqlFn.mockResolvedValueOnce([{ user_id: 'u1' }]);
+  it('resetSpend:true — locks, draws over-base spend down FIFO, zeroes spend, writes plan_base + budget', async () => {
+    txResults = [[{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
+    const result = await setUserBudget('u1', 50, true);
+    expect(result).toBe(true);
+    expect(reconstructSql(txCalls[0]).sql).toContain('FOR UPDATE');
+
+    const write = reconstructSql(txCalls[1]);
+    // The over-base amount is derived from plan_base, never from the mutable budget.
+    expect(write.sql).toContain('SELECT plan_base, spend FROM user_budgets');
+    expect(write.sql).toContain('(SELECT spend FROM cur), 0) - COALESCE((SELECT plan_base FROM cur)');
+    expect(write.sql).toContain('SET plan_base = EXCLUDED.plan_base, budget = EXCLUDED.budget, spend = 0');
+    // FIFO draw-down + user-favouring floor + the non-negative cap are all present.
+    expect(write.sql).toContain('ORDER BY created_at, idempotency_key ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING');
+    expect(write.sql).toContain('LEAST(b.remaining_cents, GREATEST(0, c.cents - p.prior_cents))');
+    expect(write.sql).toContain('floor(');
+    expect(write.values).toContain(50);
+  });
+
+  it('never derives the base from the mutable budget column (the concurrency bug this replaced)', async () => {
+    txResults = [[{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
     await setUserBudget('u1', 50, true);
-    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
-    expect(sql).toBe(
-      'WITH cur AS ( SELECT budget, spend FROM user_budgets WHERE user_id = $0 ), ' +
-        'purchased AS ( SELECT idempotency_key, remaining_cents, COALESCE(SUM(remaining_cents) OVER ' +
-        '(ORDER BY created_at, idempotency_key ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS prior_cents ' +
-        'FROM budget_increments WHERE user_id = $1 AND remaining_cents > 0 ), ' +
-        'consumed AS ( SELECT COALESCE(( SELECT GREATEST(0, floor((cur.spend - (cur.budget - ' +
-        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM purchased) / 100.0)) * 100))::bigint FROM cur ), 0) AS cents ), ' +
-        'drawn AS ( UPDATE budget_increments b SET remaining_cents = b.remaining_cents - ' +
-        'LEAST(b.remaining_cents, GREATEST(0, c.cents - p.prior_cents))::int FROM purchased p, consumed c ' +
-        'WHERE b.idempotency_key = p.idempotency_key RETURNING b.remaining_cents ), ' +
-        'upsert AS ( INSERT INTO user_budgets (user_id, budget, spend) VALUES ($2, $3::numeric + ' +
-        '(SELECT COALESCE(SUM(remaining_cents), 0) FROM drawn) / 100.0, 0) ' +
-        'ON CONFLICT (user_id) DO UPDATE SET budget = EXCLUDED.budget, spend = 0, updated_at = NOW() RETURNING user_id ) ' +
-        'SELECT user_id FROM upsert',
-    );
-    expect(values).toEqual(['u1', 'u1', 'u1', 50]);
+    const write = reconstructSql(txCalls[1]);
+    // The old, racy derivation `cur.budget - SUM(purchased)/100` must be gone.
+    expect(write.sql).not.toContain('cur.budget');
   });
 
-  it('calls different SQL paths for resetSpend true vs false', async () => {
-    // Reason: The two branches produce different SQL (one zeros spend, the other doesn't).
-    // We verify both branches are reachable and produce results.
-    mockSqlFn.mockResolvedValue([{ user_id: 'u1' }]);
-
-    await setUserBudget('u1', 10, false);
-    const callNoReset = mockSqlFn.mock.calls[0];
-
-    mockSqlFn.mockClear();
-
-    await setUserBudget('u1', 10, true);
-    const callWithReset = mockSqlFn.mock.calls[0];
-
-    // Tagged template calls differ — the resetSpend: true path includes spend = 0
-    expect(callNoReset).not.toEqual(callWithReset);
+  it('returns false when the upsert wrote no row', async () => {
+    txResults = [[], []];
+    expect(await setUserBudget('nobody', 10, false)).toBe(false);
   });
 
-  it('propagates a DB error', async () => {
-    mockSqlFn.mockRejectedValueOnce(new Error('connection lost'));
+  it('propagates a DB error from inside the transaction', async () => {
+    (mockSqlFn as unknown as { begin: unknown }).begin = () =>
+      Promise.reject(new Error('connection lost'));
     await expect(setUserBudget('u1', 10, false)).rejects.toThrow('connection lost');
   });
 });
@@ -238,7 +241,7 @@ describe('incrementUserBudget (exactly-once purchased credit)', () => {
     expect(sql).toBe(
       'WITH ins AS ( INSERT INTO budget_increments (idempotency_key, user_id, delta_cents, remaining_cents) VALUES ($0, $1, $2, $3) ' +
         'ON CONFLICT (idempotency_key) DO NOTHING RETURNING delta_cents ), ' +
-        'applied AS ( INSERT INTO user_budgets (user_id, budget, spend) SELECT $4, delta_cents::numeric / 100, 0 FROM ins ' +
+        'applied AS ( INSERT INTO user_budgets (user_id, plan_base, budget, spend) SELECT $4, 0, delta_cents::numeric / 100, 0 FROM ins ' +
         'ON CONFLICT (user_id) DO UPDATE SET budget = user_budgets.budget + EXCLUDED.budget, updated_at = NOW() ' +
         'RETURNING budget, spend ) ' +
         'SELECT (SELECT count(*) FROM ins) AS applied, ' +
