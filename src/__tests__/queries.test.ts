@@ -60,16 +60,23 @@ function reconstructSql(call: unknown[]): { sql: string; values: unknown[] } {
 
 describe('setUserBudget (plan_base is the base of record; a locked transaction rematerialises the ceiling)', () => {
   it('locks the row FIRST, then writes plan_base + budget = base + remaining, spend untouched (resetSpend:false)', async () => {
-    txResults = [[{ plan_base: '10' }], [{ user_id: 'u1' }]];
+    txResults = [[], [{ plan_base: '10' }], [{ user_id: 'u1' }]];
     const result = await setUserBudget('u1', 200, false);
     expect(result).toBe(true);
-    expect(txCalls).toHaveLength(2);
+    expect(txCalls).toHaveLength(3);
 
-    const lock = reconstructSql(txCalls[0]);
+    // The row is guaranteed to exist BEFORE the lock, so FOR UPDATE actually locks it.
+    const guarantee = reconstructSql(txCalls[0]);
+    expect(guarantee.sql).toBe(
+      'INSERT INTO user_budgets (user_id) VALUES ($0) ON CONFLICT (user_id) DO NOTHING',
+    );
+    expect(guarantee.values).toEqual(['u1']);
+
+    const lock = reconstructSql(txCalls[1]);
     expect(lock.sql).toBe('SELECT plan_base FROM user_budgets WHERE user_id = $0 FOR UPDATE');
     expect(lock.values).toEqual(['u1']);
 
-    const write = reconstructSql(txCalls[1]);
+    const write = reconstructSql(txCalls[2]);
     expect(write.sql).toBe(
       'INSERT INTO user_budgets (user_id, plan_base, budget) VALUES ($0, $1, $2::numeric + ' +
         '(SELECT COALESCE(SUM(remaining_cents), 0) FROM budget_increments WHERE user_id = $3) / 100.0) ' +
@@ -80,12 +87,13 @@ describe('setUserBudget (plan_base is the base of record; a locked transaction r
   });
 
   it('resetSpend:true — locks, draws over-base spend down FIFO, zeroes spend, writes plan_base + budget', async () => {
-    txResults = [[{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
+    txResults = [[], [{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
     const result = await setUserBudget('u1', 50, true);
     expect(result).toBe(true);
-    expect(reconstructSql(txCalls[0]).sql).toContain('FOR UPDATE');
+    expect(reconstructSql(txCalls[0]).sql).toContain('ON CONFLICT (user_id) DO NOTHING');
+    expect(reconstructSql(txCalls[1]).sql).toContain('FOR UPDATE');
 
-    const write = reconstructSql(txCalls[1]);
+    const write = reconstructSql(txCalls[2]);
     // The over-base amount is derived from plan_base, never from the mutable budget.
     expect(write.sql).toContain('SELECT plan_base, spend FROM user_budgets');
     expect(write.sql).toContain('(SELECT spend FROM cur), 0) - COALESCE((SELECT plan_base FROM cur)');
@@ -94,19 +102,19 @@ describe('setUserBudget (plan_base is the base of record; a locked transaction r
     expect(write.sql).toContain('ORDER BY created_at, idempotency_key ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING');
     expect(write.sql).toContain('LEAST(b.remaining_cents, GREATEST(0, c.cents - p.prior_cents))');
     expect(write.sql).toContain('floor(');
-    expect(write.values).toContain(50);
+    expect(write.values).toEqual(['u1', 'u1', 'u1', 50, 50]);
   });
 
   it('never derives the base from the mutable budget column (the concurrency bug this replaced)', async () => {
-    txResults = [[{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
+    txResults = [[], [{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
     await setUserBudget('u1', 50, true);
-    const write = reconstructSql(txCalls[1]);
+    const write = reconstructSql(txCalls[2]);
     // The old, racy derivation `cur.budget - SUM(purchased)/100` must be gone.
     expect(write.sql).not.toContain('cur.budget');
   });
 
   it('returns false when the upsert wrote no row', async () => {
-    txResults = [[], []];
+    txResults = [[], [], []];
     expect(await setUserBudget('nobody', 10, false)).toBe(false);
   });
 

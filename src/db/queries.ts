@@ -138,6 +138,11 @@ export async function setUserBudget(
   // column `plan_base` and is read directly — NEVER derived from the mutable `budget`
   // — so the reset draw-down cannot be corrupted by a purchase that landed in the gap.
   return sql.begin(async (tx) => {
+    // Guarantee the row before locking: SELECT ... FOR UPDATE locks nothing when the
+    // row does not exist yet, so a first-ever write (a purchase creating the row, or a
+    // re-provision after DELETE) could still race. This insert makes the row exist so
+    // the FOR UPDATE below actually serializes a concurrent increment.
+    await tx`INSERT INTO user_budgets (user_id) VALUES (${userId}) ON CONFLICT (user_id) DO NOTHING`;
     await tx`SELECT plan_base FROM user_budgets WHERE user_id = ${userId} FOR UPDATE`;
     if (resetSpend) {
       // Draw the spend that exceeded the CURRENT plan base down from purchases FIFO
