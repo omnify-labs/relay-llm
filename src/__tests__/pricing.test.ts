@@ -21,6 +21,16 @@ const io = (m: string, inTok: number, outTok: number) =>
   (inTok / 1e6) * PRICING[m].inputPerMillion + (outTok / 1e6) * PRICING[m].outputPerMillion;
 
 describe('calculateCost', () => {
+  it('bills Gemini 3.8 Flash input, output, and cached input at published rates', () => {
+    const pricing = PRICING['gemini-3.8-flash'];
+    expect(pricing).toBeDefined();
+    expect(pricing.inputPerMillion).toBe(0.75);
+    expect(pricing.outputPerMillion).toBe(3.75);
+    expect(pricing.cachedInputPerMillion).toBe(0.075);
+    expect(calculateCostMicroUsd('gemini-3.8-flash', 100_000, 1_000, 90_000, 0)).toBe(18_000n);
+    expect(calculateCostMicroUsd('gemini-3.8-flash', 0, 0, 0, 0)).toBe(0n);
+  });
+
   // --- Existing tests (updated signature) ---
 
   it('calculates cost for known OpenAI model', () => {
