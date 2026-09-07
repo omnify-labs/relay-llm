@@ -95,6 +95,7 @@ export const SERVED_MODELS: readonly string[] = [
   // expensive served rate per component, no cache discount): many times the real
   // input rate and orders of magnitude over the real cached rate on exactly the
   // long, heavily-cached browser sessions it is meant for.
+  'gemini-3.8-flash',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   // 2026-08 lineup: gemini-3.5-flash-lite is the managed budget tier (dassi PR
