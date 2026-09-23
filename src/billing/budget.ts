@@ -13,6 +13,15 @@ import { getUserBudget } from '../db/queries.js';
 import { isRunAdmitted, admitRun } from './run-admission.js';
 
 /**
+ * Plan base at or below this (USD) is a free/trial user — the small starter grant
+ * ($2–$5); the cheapest paid tier (Starter) is $50. Free/trial users are NEVER admitted
+ * into the run-scoped grace, so budget is re-checked on EVERY request and a runaway loop
+ * cannot outspend its $2–$5 cap through the admission window. Paid tiers keep the
+ * no-mid-task-402 grace.
+ */
+const FREE_TIER_PLAN_BASE_CEILING = 10;
+
+/**
  * Budget check middleware.
  *
  * Gates a run's FIRST call on the user's spend vs budget, then admits the rest of that
@@ -29,7 +38,8 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
 
   try {
     // Reason: in-flight admitted run — allow without re-checking budget so a task is
-    // never interrupted mid-run once it has been admitted.
+    // never interrupted mid-run once it has been admitted. Only PAID runs are ever admitted
+    // (see below), so a hit here is a paying user mid-task, not a free/trial loop.
     if (runId && isRunAdmitted(userId, runId)) {
       await next();
       return;
@@ -45,10 +55,12 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
       return c.json({ error: 'Budget exceeded' }, 402);
     }
 
-    // Reason: new run (or one whose idle window lapsed) with budget available — admit it so
-    // the rest of THIS run is not interrupted mid-task. It stays admitted until it ends
-    // (endRun) or idles out; the gate lands on the NEXT run's first call.
-    if (runId) admitRun(userId, runId);
+    // Reason: grant the run-scoped no-mid-task-402 grace to PAID tiers only. A free/trial
+    // user (plan base ≤ ceiling) is never admitted, so every one of their requests re-checks
+    // budget above and 402s at the cap — a continuous loop can't outrun a $2–$5 grant through
+    // the admission window. For a paid run, admit it so the rest of THIS run is not
+    // interrupted mid-task; it stays admitted until it ends (endRun) or idles out.
+    if (runId && budget.planBase > FREE_TIER_PLAN_BASE_CEILING) admitRun(userId, runId);
 
     await next();
   } catch (error) {

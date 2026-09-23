@@ -146,9 +146,9 @@ describe('deleteUserBudget', () => {
 
 describe('getUserBudget', () => {
   it('returns budget record when user exists', async () => {
-    mockSqlFn.mockResolvedValueOnce([{ budget: '25.0000', spend: '3.5000' }]);
+    mockSqlFn.mockResolvedValueOnce([{ budget: '25.0000', spend: '3.5000', plan_base: '5.0000' }]);
     const result = await getUserBudget('u1');
-    expect(result).toEqual({ budget: 25, spend: 3.5 });
+    expect(result).toEqual({ budget: 25, spend: 3.5, planBase: 5 });
   });
 
   it('returns null when user has no budget', async () => {
@@ -161,9 +161,9 @@ describe('getUserBudget', () => {
     // Reason: covers the `parseFloat(...) || 0` fallback — a NaN here would make
     // the fail-closed `spend >= budget` comparison in budgetMiddleware always
     // false and silently unlimit the user.
-    mockSqlFn.mockResolvedValueOnce([{ budget: null, spend: 'not-a-number' }]);
+    mockSqlFn.mockResolvedValueOnce([{ budget: null, spend: 'not-a-number', plan_base: null }]);
     const result = await getUserBudget('u1');
-    expect(result).toEqual({ budget: 0, spend: 0 });
+    expect(result).toEqual({ budget: 0, spend: 0, planBase: 0 });
   });
 
   it('propagates a DB error', async () => {
