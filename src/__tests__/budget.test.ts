@@ -44,7 +44,7 @@ beforeEach(() => __resetAdmissionsForTests());
 
 describe('budgetMiddleware', () => {
   it('allows request when spend is under budget', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10, planBase: 50 });
     const app = buildTestApp();
 
     const res = await app.request('/test');
@@ -54,7 +54,7 @@ describe('budgetMiddleware', () => {
   });
 
   it('rejects with 402 when spend equals budget', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 25 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 25, planBase: 50 });
     const app = buildTestApp();
 
     const res = await app.request('/test');
@@ -64,7 +64,7 @@ describe('budgetMiddleware', () => {
   });
 
   it('rejects with 402 when spend exceeds budget', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15, planBase: 50 });
     const app = buildTestApp();
 
     const res = await app.request('/test');
@@ -96,7 +96,7 @@ describe('budgetMiddleware', () => {
   });
 
   it('passes correct userId to getUserBudget', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 100, spend: 0 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 100, spend: 0, planBase: 50 });
     const app = buildTestApp();
 
     await app.request('/test');
@@ -110,14 +110,14 @@ describe('budgetMiddleware', () => {
  */
 describe('budgetMiddleware — per-run admission', () => {
   it('admits a new run when budget is available (first call passes)', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10, planBase: 50 });
     const app = buildTestApp();
     const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-1' } });
     expect(res.status).toBe(200);
   });
 
   it('admits a run under budget so the first call passes and it is tracked', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10, planBase: 50 });
     const app = buildTestApp();
     const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-hr' } });
     expect(res.status).toBe(200);
@@ -128,7 +128,7 @@ describe('budgetMiddleware — per-run admission', () => {
     // Reason: admission must happen only AFTER the spend >= budget check passes. A
     // mutant that admits before the check would leave a refused run admitted, so its
     // next call would bypass the gate — the exact bug this test exists to catch.
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 5 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 5, planBase: 50 });
     const app = buildTestApp();
     const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-refused' } });
     expect(res.status).toBe(402);
@@ -146,16 +146,63 @@ describe('budgetMiddleware — per-run admission', () => {
   });
 
   it('blocks a NEW run at its first call when spend is exhausted', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15, planBase: 50 });
     const app = buildTestApp();
     const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'run-2' } });
     expect(res.status).toBe(402);
   });
 
   it('keeps legacy per-call behavior when no run-id header is present', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 15, planBase: 50 });
     const app = buildTestApp();
     const res = await app.request('/test');
     expect(res.status).toBe(402);
+  });
+});
+
+/**
+ * Free/trial tier (plan base ≤ ceiling): the run-scoped grace is withheld, so every
+ * request re-checks budget and a runaway loop can't outspend its small cap through the
+ * admission window (the abuse this closes).
+ */
+describe('budgetMiddleware — free/trial hard enforcement', () => {
+  it('does NOT admit a free-tier run (no mid-task grace)', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 0, planBase: 5 });
+    const app = buildTestApp();
+    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'free-run' } });
+    expect(res.status).toBe(200);
+    // The whole point: it is NOT parked in the admission window.
+    expect(isRunAdmitted('user-42', 'free-run')).toBe(false);
+  });
+
+  it('402s a free-tier run once it hits its cap, even mid-run (re-checked every call)', async () => {
+    const app = buildTestApp();
+    // First call: under cap → passes, but is not admitted.
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 4, planBase: 5 });
+    let res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'free-run' } });
+    expect(res.status).toBe(200);
+    // Next call of the SAME run: now at cap → 402 (a paid admitted run would have bypassed).
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 5, planBase: 5 });
+    res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'free-run' } });
+    expect(res.status).toBe(402);
+  });
+
+  it('a paid run keeps the grace: admitted, then over-budget calls still pass', async () => {
+    const app = buildTestApp();
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 200, spend: 10, planBase: 200 });
+    let res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'paid-run' } });
+    expect(res.status).toBe(200);
+    expect(isRunAdmitted('user-42', 'paid-run')).toBe(true);
+    // Second call bypasses the budget query entirely (grace), so no mock is consumed.
+    res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'paid-run' } });
+    expect(res.status).toBe(200);
+  });
+
+  it('a plan base exactly at the ceiling is still treated as free (not admitted)', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 0, planBase: 10 });
+    const app = buildTestApp();
+    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'edge-run' } });
+    expect(res.status).toBe(200);
+    expect(isRunAdmitted('user-42', 'edge-run')).toBe(false);
   });
 });

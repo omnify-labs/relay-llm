@@ -7,6 +7,8 @@ import { getDb } from './client.js';
 export interface UserBudget {
   spend: number;
   budget: number;
+  /** The plan's base ceiling (tier grant, excl. purchased credit). Free/trial is $2–$5. */
+  planBase: number;
 }
 
 export interface UsageLogInsert {
@@ -35,7 +37,7 @@ export interface UsageLogInsert {
 export async function getUserBudget(userId: string): Promise<UserBudget | null> {
   const sql = getDb();
   const rows = await sql`
-    SELECT budget, spend
+    SELECT budget, spend, plan_base
     FROM user_budgets
     WHERE user_id = ${userId}
     LIMIT 1
@@ -44,6 +46,7 @@ export async function getUserBudget(userId: string): Promise<UserBudget | null> 
   return {
     budget: parseFloat(rows[0].budget) || 0,
     spend: parseFloat(rows[0].spend) || 0,
+    planBase: parseFloat(rows[0].plan_base) || 0,
   };
 }
 
