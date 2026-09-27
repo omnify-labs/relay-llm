@@ -1,62 +1,117 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { Hono } from 'hono';
+import { SignJWT } from 'jose';
+import { authMiddleware } from '../auth/jwt.js';
+import { budgetMiddleware } from '../billing/budget.js';
+import { loadEnv } from '../config/env.js';
+import { getUserBudget, incrementUserSpend, insertUsageLog } from '../db/queries.js';
 
-/**
- * Test the usage parsing logic from handler.ts.
- * We extract and test the parsing functions directly.
- */
+vi.mock('../db/queries.js', () => ({
+  getUserBudget: vi.fn(),
+  incrementUserSpend: vi.fn().mockResolvedValue(undefined),
+  insertUsageLog: vi.fn().mockResolvedValue(undefined),
+}));
 
-// Re-implement parsing logic here for unit testing
-// (In production, these would be exported from handler.ts)
+import { parseUsageFromBody, parseUsageFromSSE, proxyHandler } from '../proxy/handler.js';
 
-interface ParsedUsage {
-  model: string | null;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  cacheCreationTokens: number;
-}
+describe('DeepSeek managed requests', () => {
+  let token: string;
+  let app: Hono;
+  const upstream = vi.fn<typeof fetch>();
+  const usage = { prompt_tokens: 1000, completion_tokens: 100, prompt_cache_hit_tokens: 700, completion_tokens_details: { reasoning_tokens: 60 } };
 
-function parseUsageFromBody(body: string, provider: 'openai' | 'anthropic' | 'google'): ParsedUsage | null {
-  try {
-    const json = JSON.parse(body);
-    switch (provider) {
-      case 'openai':
-        return {
-          model: json.model,
-          inputTokens: json.usage?.prompt_tokens || 0,
-          outputTokens: json.usage?.completion_tokens || 0,
-          cachedInputTokens: json.usage?.prompt_tokens_details?.cached_tokens || 0,
-          cacheCreationTokens: 0,
-        };
-      case 'anthropic': {
-        const baseInput = json.usage?.input_tokens || 0;
-        const cacheRead = json.usage?.cache_read_input_tokens || 0;
-        const cacheCreate = json.usage?.cache_creation_input_tokens || 0;
-        return {
-          model: json.model,
-          // Reason: Anthropic's input_tokens does NOT include cache tokens.
-          // Normalize to total for consistent cost calculation.
-          inputTokens: baseInput + cacheRead + cacheCreate,
-          outputTokens: json.usage?.output_tokens || 0,
-          cachedInputTokens: cacheRead,
-          cacheCreationTokens: cacheCreate,
-        };
-      }
-      case 'google':
-        return {
-          model: json.modelVersion || null,
-          inputTokens: json.usageMetadata?.promptTokenCount || 0,
-          outputTokens: json.usageMetadata?.candidatesTokenCount || 0,
-          cachedInputTokens: json.usageMetadata?.cachedContentTokenCount || 0,
-          cacheCreationTokens: 0,
-        };
-      default:
-        return null;
-    }
-  } catch {
-    return null;
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.stubEnv('JWT_SECRET', 'test-deepseek-jwt-secret');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-provider-key');
+    vi.stubGlobal('fetch', upstream);
+    vi.mocked(getUserBudget).mockResolvedValue({ budget: 10, spend: 0 });
+    token = await new SignJWT({}).setProtectedHeader({ alg: 'HS256' }).setSubject('test-user')
+      .setExpirationTime('1h').sign(new TextEncoder().encode(process.env.JWT_SECRET));
+    app = new Hono();
+    app.all('/v1/deepseek/*', authMiddleware, budgetMiddleware, proxyHandler('deepseek'));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  function request(body = '{ "model": "deepseek-flash", "stream": true }') {
+    return app.request('/v1/deepseek/chat/completions', {
+      method: 'POST', body,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    });
   }
-}
+
+  it.each([true, false])('forwards bytes unchanged and charges cached/reasoning usage once (stream=%s)', async (stream) => {
+    const payload = { model: 'deepseek-flash', usage };
+    const responseBody = stream
+      ? `: keep-alive\n\ndata: ${JSON.stringify({ model: 'deepseek-flash', choices: [] })}\n\ndata: ${JSON.stringify({ usage })}\n\ndata: [DONE]\n\n`
+      : JSON.stringify(payload);
+    let forwarded = '';
+    upstream.mockImplementationOnce(async (_input, init) => {
+      forwarded = await new Response(init?.body).text();
+      return new Response(responseBody, { headers: { 'Content-Type': stream ? 'text/event-stream' : 'application/json' } });
+    });
+    const requestBody = ` { "model": "deepseek-flash", "stream": ${stream}, "messages": [], "thinking": {"type":"enabled"} } `;
+    const response = await request(requestBody);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(responseBody);
+    expect(forwarded).toBe(requestBody);
+    expect(upstream).toHaveBeenCalledOnce();
+    const [url, init] = upstream.mock.calls[0];
+    expect(url).toBe('https://api.deepseek.com/chat/completions');
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer test-provider-key');
+    expect(response.headers.get('Authorization')).toBeNull();
+    await vi.waitFor(() => expect(incrementUserSpend).toHaveBeenCalledOnce());
+    expect(incrementUserSpend).toHaveBeenCalledWith('test-user', expect.closeTo(0.0002142, 10));
+    expect(insertUsageLog).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'deepseek', model: 'deepseek-flash', inputTokens: 1000,
+      outputTokens: 100, cachedInputTokens: 700, cacheCreationTokens: 0,
+    }));
+  });
+
+  it('rejects missing authentication before accessing the upstream', async () => {
+    const response = await app.request('/v1/deepseek/chat/completions', { method: 'POST' });
+    expect(response.status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('rejects exhausted credits before accessing the upstream', async () => {
+    vi.mocked(getUserBudget).mockResolvedValueOnce({ budget: 10, spend: 10 });
+    expect((await request()).status).toBe(402);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on a budget database error', async () => {
+    vi.mocked(getUserBudget).mockRejectedValueOnce(new Error('database unavailable'));
+    expect((await request()).status).toBe(503);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('passes upstream rate-limit errors through without charging', async () => {
+    const body = '{"error":{"message":"Rate limit reached"}}';
+    upstream.mockResolvedValueOnce(new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } }));
+    const response = await request();
+    expect(response.status).toBe(429);
+    expect(await response.text()).toBe(body);
+    expect(incrementUserSpend).not.toHaveBeenCalled();
+  });
+
+  it('requires a server-side DeepSeek key at startup', () => {
+    for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY', 'RELAY_ADMIN_SECRET']) vi.stubEnv(key, 'test');
+    expect(loadEnv().DEEPSEEK_API_KEY).toBe('test-provider-key');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    expect(() => loadEnv()).toThrow('Missing required env var: DEEPSEEK_API_KEY');
+  });
+
+  it('ignores incomplete streams and malformed usage responses', () => {
+    expect(parseUsageFromSSE(': keep-alive\n\ndata: invalid\n\ndata: [DONE]\n', 'deepseek')).toBeNull();
+    expect(parseUsageFromBody('{"error":"unavailable"}', 'deepseek')).toBeNull();
+    expect(parseUsageFromBody('invalid', 'deepseek')).toBeNull();
+  });
+});
 
 describe('parseUsageFromBody', () => {
   it('parses OpenAI response usage', () => {
@@ -198,92 +253,6 @@ describe('parseUsageFromBody', () => {
     });
   });
 });
-
-/**
- * SSE parsing tests for cache token extraction.
- * Re-implements parseUsageFromSSE locally for testing.
- */
-
-function parseUsageFromSSE(
-  sseText: string,
-  provider: 'openai' | 'anthropic' | 'google',
-): ParsedUsage | null {
-  const lines = sseText.split('\n');
-  let lastModel: string | null = null;
-  let lastUsage: ParsedUsage | null = null;
-
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
-    const data = line.slice(6).trim();
-    if (data === '[DONE]') continue;
-
-    try {
-      const json = JSON.parse(data);
-
-      switch (provider) {
-        case 'openai':
-          if (json.model) lastModel = json.model;
-          if (json.usage) {
-            lastUsage = {
-              model: lastModel,
-              inputTokens: json.usage.prompt_tokens || 0,
-              outputTokens: json.usage.completion_tokens || 0,
-              cachedInputTokens: json.usage.prompt_tokens_details?.cached_tokens || 0,
-              cacheCreationTokens: 0,
-            };
-          }
-          break;
-        case 'anthropic': {
-          if (json.type === 'message_start' && json.message?.model) {
-            lastModel = json.message.model;
-          }
-          if (json.type === 'message_start' && json.message?.usage) {
-            const u = json.message.usage;
-            const baseInput = u.input_tokens || 0;
-            const cacheRead = u.cache_read_input_tokens || 0;
-            const cacheCreate = u.cache_creation_input_tokens || 0;
-            lastUsage = {
-              model: lastModel,
-              inputTokens: baseInput + cacheRead + cacheCreate,
-              outputTokens: u.output_tokens || 0,
-              cachedInputTokens: cacheRead,
-              cacheCreationTokens: cacheCreate,
-            };
-          }
-          if (json.type === 'message_delta' && json.usage) {
-            if (lastUsage) {
-              lastUsage.outputTokens = json.usage.output_tokens || 0;
-            } else {
-              lastUsage = {
-                model: lastModel,
-                inputTokens: 0,
-                outputTokens: json.usage.output_tokens || 0,
-                cachedInputTokens: 0,
-                cacheCreationTokens: 0,
-              };
-            }
-          }
-          break;
-        }
-        case 'google':
-          if (json.usageMetadata) {
-            lastUsage = {
-              model: json.modelVersion || lastModel,
-              inputTokens: json.usageMetadata.promptTokenCount || 0,
-              outputTokens: json.usageMetadata.candidatesTokenCount || 0,
-              cachedInputTokens: json.usageMetadata.cachedContentTokenCount || 0,
-              cacheCreationTokens: 0,
-            };
-          }
-          break;
-      }
-    } catch {
-      // Skip unparseable SSE chunks
-    }
-  }
-
-  return lastUsage;
-}
 
 describe('parseUsageFromSSE — cache token extraction', () => {
   it('extracts OpenAI cached tokens from streaming final chunk', () => {

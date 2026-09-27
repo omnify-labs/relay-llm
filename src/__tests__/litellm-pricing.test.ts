@@ -5,6 +5,15 @@ import {
 } from '../billing/litellm-pricing.js';
 
 describe('litellm-pricing', () => {
+  it('bills Dassi Pro at the published standard tariff, including cache discounts', () => {
+    expect(SERVED_MODELS).toContain('deepseek-flash');
+    expect(PRICING['deepseek-flash']).toEqual({
+      inputPerMillion: 0.3,
+      outputPerMillion: 1.2,
+      cachedInputPerMillion: 0.006,
+      cacheCreationPerMillion: 0,
+    });
+  });
   it('converts per-token to per-million (×1e6)', () => {
     const p = normalizeEntry({ input_cost_per_token: 3e-6, output_cost_per_token: 1.5e-5 });
     expect(p.inputPerMillion).toBeCloseTo(3.0, 6);

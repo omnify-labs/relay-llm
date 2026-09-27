@@ -2,10 +2,16 @@ import { describe, it, expect } from 'vitest';
 import { PROVIDERS } from '../proxy/providers.js';
 
 describe('Provider configuration', () => {
-  it('has all three providers configured', () => {
+  it('has all four providers configured', () => {
     expect(PROVIDERS.openai).toBeDefined();
     expect(PROVIDERS.anthropic).toBeDefined();
     expect(PROVIDERS.google).toBeDefined();
+    expect(PROVIDERS.deepseek).toEqual({
+      upstream: 'https://api.deepseek.com',
+      apiKeyEnvVar: 'DEEPSEEK_API_KEY',
+      authMethod: 'bearer',
+      routePrefix: '/v1/deepseek',
+    });
   });
 
   it('OpenAI uses bearer auth', () => {

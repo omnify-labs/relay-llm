@@ -271,18 +271,25 @@ interface ParsedUsage {
  * - inputTokens always = total prompt tokens (including cached)
  * - Anthropic: input_tokens does NOT include cache tokens, so we add them back
  * - OpenAI/Google: prompt_tokens already includes cached, use as-is
+ * @param body - Provider response JSON, read from the accounting copy.
+ * @param provider - Native upstream provider.
+ * @returns Normalized usage, or null when unavailable/unparseable.
  */
-function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage | null {
+export function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage | null {
   try {
     const json = JSON.parse(body);
 
     switch (provider) {
+      case 'deepseek':
       case 'openai':
+        if (provider === 'deepseek' && !json.usage) return null;
         return {
           model: json.model,
           inputTokens: json.usage?.prompt_tokens || 0,
           outputTokens: json.usage?.completion_tokens || 0,
-          cachedInputTokens: json.usage?.prompt_tokens_details?.cached_tokens || 0,
+          cachedInputTokens: provider === 'deepseek'
+            ? json.usage.prompt_cache_hit_tokens || 0
+            : json.usage?.prompt_tokens_details?.cached_tokens || 0,
           cacheCreationTokens: 0,
         };
       case 'anthropic': {
@@ -322,8 +329,11 @@ function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage |
  * Semantic normalization:
  * - inputTokens always = total prompt tokens (including cached)
  * - Anthropic: message_start sets input/cache fields; message_delta only updates outputTokens (cache fields preserved)
+ * @param sseText - Provider SSE text, read from the accounting copy.
+ * @param provider - Native upstream provider.
+ * @returns Final usage, or null for streams without usage.
  */
-function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage | null {
+export function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage | null {
   const lines = sseText.split('\n');
   let lastModel: string | null = null;
   let lastUsage: ParsedUsage | null = null;
@@ -337,6 +347,7 @@ function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage
       const json = JSON.parse(data);
 
       switch (provider) {
+        case 'deepseek':
         case 'openai':
           if (json.model) lastModel = json.model;
           if (json.usage) {
@@ -344,7 +355,9 @@ function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage
               model: lastModel,
               inputTokens: json.usage.prompt_tokens || 0,
               outputTokens: json.usage.completion_tokens || 0,
-              cachedInputTokens: json.usage.prompt_tokens_details?.cached_tokens || 0,
+              cachedInputTokens: provider === 'deepseek'
+                ? json.usage.prompt_cache_hit_tokens || 0
+                : json.usage.prompt_tokens_details?.cached_tokens || 0,
               cacheCreationTokens: 0,
             };
           }

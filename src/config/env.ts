@@ -11,6 +11,7 @@ export interface Env {
   OPENAI_API_KEY: string;
   ANTHROPIC_API_KEY: string;
   GOOGLE_API_KEY: string;
+  DEEPSEEK_API_KEY: string;
 
   // JWT validation (any HS256 secret — works with Supabase, Auth0, Firebase, etc.)
   JWT_SECRET: string;
@@ -42,6 +43,7 @@ export function loadEnv(): Env {
     OPENAI_API_KEY: required('OPENAI_API_KEY'),
     ANTHROPIC_API_KEY: required('ANTHROPIC_API_KEY'),
     GOOGLE_API_KEY: required('GOOGLE_API_KEY'),
+    DEEPSEEK_API_KEY: required('DEEPSEEK_API_KEY'),
 
     JWT_SECRET: required('JWT_SECRET'),
 

@@ -104,8 +104,31 @@ The trade-off is explicit: you send requests in each provider's **native format*
 | OpenAI | `/v1/openai/**` | `api.openai.com` |
 | Anthropic | `/v1/anthropic/**` | `api.anthropic.com` |
 | Google | `/v1/google/**` | `generativelanguage.googleapis.com` |
+| DeepSeek | `/v1/deepseek/**` | `api.deepseek.com` |
 
-Adding a provider is a single config entry in `src/proxy/providers.ts` — no translation logic needed since RelayLLM forwards everything as-is.
+Provider registration includes `src/proxy/providers.ts`, the authenticated route
+in `src/index.ts`, environment validation, and usage/pricing coverage. RelayLLM
+forwards native request and response bytes without format translation.
+
+### Dassi Pro / DeepSeek V4.1 Flash
+
+Provision `DEEPSEEK_API_KEY` in the server environment before deploying this
+version; startup validation requires it. Clients use their existing managed JWT
+at `POST /v1/deepseek/chat/completions` with model `deepseek-flash`. The provider
+key stays on the server. Authentication, run admission, and credit enforcement
+use the existing middleware.
+
+Usage accounting reads `prompt_cache_hit_tokens` for cache discounts and bills
+`completion_tokens` once, including reasoning. Dassi Pro uses fixed standard
+rates: $0.30/M uncached input, $0.006/M cached input, $1.20/M output. Off-peak
+provider discounts are not passed through. The tariff is explicit in
+`src/billing/litellm-pricing.ts` because the vendored price table predates this
+model. Source: [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/),
+verified September 26, 2026.
+
+Deploy Relay before the companion Dassi model-list function and extension.
+Verify a real authenticated streamed tool-call conversation and its usage log
+before customer activation.
 
 ## Quick Start
 
@@ -158,6 +181,7 @@ curl http://localhost:8080/v1/google/v1beta/models/gemini-2.0-flash:generateCont
 ```bash
 # Provider API keys (server-side only, never exposed to clients)
 OPENAI_API_KEY=sk-...
+DEEPSEEK_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 GOOGLE_API_KEY=AIza...
 

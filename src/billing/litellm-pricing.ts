@@ -3,7 +3,8 @@
  * Loads model pricing from the vendored LiteLLM price table and normalizes it
  * into relay's per-million ModelPricing shape.
  *
- * Source of truth: vendor/litellm/model_prices_and_context_window.json
+ * Source of truth: vendor/litellm/model_prices_and_context_window.json, with
+ * explicit managed tariffs in PRICE_OVERRIDES below.
  * (a vendored copy of BerriAI/litellm's price file, refreshed by the
  * litellm-prices-sync workflow). tsup inlines the JSON at build time, so there
  * is no runtime file dependency.
@@ -36,11 +37,23 @@ interface LiteLLMEntry {
 const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>; // Reason: the JSON import infers a deep literal type; `as unknown` widens it to a typed Record without @ts-ignore.
 const M = 1_000_000;
 
+// Dassi Pro uses fixed standard (peak) rates, including on discounted hours.
+// The vendored LiteLLM table predates V4.1; keep the tariff explicit across syncs.
+// https://api-docs.deepseek.com/quick_start/pricing/ (2026-09-26)
+const PRICE_OVERRIDES: Record<string, LiteLLMEntry> = {
+  'deepseek-flash': {
+    input_cost_per_token: 0.3 / M,
+    output_cost_per_token: 1.2 / M,
+    cache_read_input_token_cost: 0.006 / M,
+  },
+};
+
 /**
  * Model IDs relay serves (as returned by the provider in responses).
- * Every entry MUST resolve to a real LiteLLM price — missingServedModels() enforces it.
+ * Every entry MUST resolve to a price — missingServedModels() enforces it.
  */
 export const SERVED_MODELS: readonly string[] = [
+  'deepseek-flash',
   'gpt-5.4', 'gpt-4.1', 'gpt-4o', 'o4-mini',
   // 2026-07 lineup refresh: claude-sonnet-5 is at Anthropic's introductory
   // $2/$10 rate in LiteLLM (standard $3/$15 from 2026-09-01) — the price will
@@ -106,13 +119,13 @@ export function normalizeEntry(entry: LiteLLMEntry): ModelPricing {
 }
 
 /**
- * Resolve a relay model id to its LiteLLM entry (via alias), or null.
+ * Resolve a relay model id to its managed tariff or LiteLLM entry, or null.
  * @param model - Relay model ID (may be an alias for a LiteLLM key).
  * @returns The raw LiteLLM entry for the model, or null if not found.
  */
 export function lookupRaw(model: string): LiteLLMEntry | null {
   const key = ALIASES[model] ?? model;
-  return RAW[key] ?? null;
+  return PRICE_OVERRIDES[key] ?? RAW[key] ?? null;
 }
 
 /**
