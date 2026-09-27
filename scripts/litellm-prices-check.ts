@@ -20,7 +20,7 @@
  *   LITELLM_PRICES_URL  - override the upstream URL (used by local tests)
  */
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
-import { SERVED_MODELS, ALIASES, normalizeEntry } from '../src/billing/litellm-pricing.js';
+import { servedFingerprint } from '../src/billing/litellm-pricing.js';
 
 const RAW_URL =
   process.env.LITELLM_PRICES_URL ??
@@ -29,27 +29,6 @@ const VENDORED = 'vendor/litellm/model_prices_and_context_window.json';
 
 /** Type of the raw upstream map: model id -> raw LiteLLM entry (only cost fields matter). */
 type RawMap = Record<string, Record<string, unknown>>;
-
-/**
- * Deterministic fingerprint of just the SERVED models' normalized pricing.
- * Two raw tables with the same served-model prices produce identical strings,
- * so any difference here means a price relay actually bills for has changed.
- *
- * @param raw - A parsed upstream/vendored LiteLLM price map.
- * @returns Stable JSON string of `{ [servedModel]: ModelPricing | null }`.
- */
-function servedFingerprint(raw: RawMap): string {
-  const out: Record<string, unknown> = {};
-  for (const model of SERVED_MODELS) {
-    const key = ALIASES[model] ?? model;
-    const entry = raw[key];
-    out[model] =
-      entry && entry['input_cost_per_token'] != null
-        ? normalizeEntry(entry as Parameters<typeof normalizeEntry>[0])
-        : null;
-  }
-  return JSON.stringify(out);
-}
 
 async function main(): Promise<void> {
   const res = await fetch(RAW_URL);

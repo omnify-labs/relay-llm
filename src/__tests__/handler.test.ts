@@ -4,12 +4,11 @@ import { SignJWT } from 'jose';
 import { authMiddleware } from '../auth/jwt.js';
 import { budgetMiddleware } from '../billing/budget.js';
 import { loadEnv } from '../config/env.js';
-import { getUserBudget, incrementUserSpend, insertUsageLog } from '../db/queries.js';
+import { getUserBudget, recordUsage } from '../db/queries.js';
 
 vi.mock('../db/queries.js', () => ({
   getUserBudget: vi.fn(),
-  incrementUserSpend: vi.fn().mockResolvedValue(undefined),
-  insertUsageLog: vi.fn().mockResolvedValue(undefined),
+  recordUsage: vi.fn().mockResolvedValue('charged'),
 }));
 
 import { parseUsageFromBody, parseUsageFromSSE, proxyHandler } from '../proxy/handler.js';
@@ -25,7 +24,7 @@ describe('DeepSeek managed requests', () => {
     vi.stubEnv('JWT_SECRET', 'test-deepseek-jwt-secret');
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-provider-key');
     vi.stubGlobal('fetch', upstream);
-    vi.mocked(getUserBudget).mockResolvedValue({ budget: 10, spend: 0 });
+    vi.mocked(getUserBudget).mockResolvedValue({ budget: 10, spend: 0, planBase: 10 });
     token = await new SignJWT({}).setProtectedHeader({ alg: 'HS256' }).setSubject('test-user')
       .setExpirationTime('1h').sign(new TextEncoder().encode(process.env.JWT_SECRET));
     app = new Hono();
@@ -64,9 +63,9 @@ describe('DeepSeek managed requests', () => {
     expect(url).toBe('https://api.deepseek.com/chat/completions');
     expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer test-provider-key');
     expect(response.headers.get('Authorization')).toBeNull();
-    await vi.waitFor(() => expect(incrementUserSpend).toHaveBeenCalledOnce());
-    expect(incrementUserSpend).toHaveBeenCalledWith('test-user', expect.closeTo(0.0002142, 10));
-    expect(insertUsageLog).toHaveBeenCalledWith(expect.objectContaining({
+    await vi.waitFor(() => expect(recordUsage).toHaveBeenCalledOnce());
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'test-user', costMicroUsd: 214,
       provider: 'deepseek', model: 'deepseek-flash', inputTokens: 1000,
       outputTokens: 100, cachedInputTokens: 700, cacheCreationTokens: 0,
     }));
@@ -79,7 +78,7 @@ describe('DeepSeek managed requests', () => {
   });
 
   it('rejects exhausted credits before accessing the upstream', async () => {
-    vi.mocked(getUserBudget).mockResolvedValueOnce({ budget: 10, spend: 10 });
+    vi.mocked(getUserBudget).mockResolvedValueOnce({ budget: 10, spend: 10, planBase: 10 });
     expect((await request()).status).toBe(402);
     expect(upstream).not.toHaveBeenCalled();
   });
@@ -96,7 +95,7 @@ describe('DeepSeek managed requests', () => {
     const response = await request();
     expect(response.status).toBe(429);
     expect(await response.text()).toBe(body);
-    expect(incrementUserSpend).not.toHaveBeenCalled();
+    expect(recordUsage).not.toHaveBeenCalled();
   });
 
   it('requires a server-side DeepSeek key at startup', () => {
@@ -316,5 +315,67 @@ describe('parseUsageFromSSE — cache token extraction', () => {
   it('handles malformed JSON in SSE gracefully', () => {
     const sse = 'data: {not valid json}\ndata: [DONE]\n';
     expect(parseUsageFromSSE(sse, 'openai')).toBeNull();
+  });
+});
+
+describe('OpenAI Responses API usage shape', () => {
+  it('parses input_tokens/output_tokens (and cached) from a Responses body', () => {
+    // Reason: the Responses API (o1-pro, gpt-5.x-pro) reports input_tokens/output_tokens,
+    // not prompt_tokens/completion_tokens. Missing this shape logged those requests at
+    // 0 tokens — billed $0 — regardless of any pricing.
+    const body = JSON.stringify({
+      id: 'resp_1',
+      model: 'o1-pro',
+      usage: { input_tokens: 1200, output_tokens: 340, input_tokens_details: { cached_tokens: 200 } },
+    });
+    expect(parseUsageFromBody(body, 'openai')).toEqual({
+      model: 'o1-pro',
+      inputTokens: 1200,
+      outputTokens: 340,
+      cachedInputTokens: 200,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it('still parses the Chat Completions shape (prompt_tokens wins when both present)', () => {
+    const body = JSON.stringify({
+      model: 'gpt-4o-2024-08-06',
+      usage: {
+        prompt_tokens: 50,
+        completion_tokens: 7,
+        prompt_tokens_details: { cached_tokens: 10 },
+        // Responses-shaped fields present too: the Chat fields must win.
+        input_tokens: 999,
+        output_tokens: 999,
+        input_tokens_details: { cached_tokens: 999 },
+      },
+    });
+    expect(parseUsageFromBody(body, 'openai')).toMatchObject({
+      model: 'gpt-4o-2024-08-06',
+      inputTokens: 50,
+      outputTokens: 7,
+      cachedInputTokens: 10,
+    });
+  });
+
+  it('parses a Responses SSE stream: model + usage ride on the response.completed event', () => {
+    const sse = [
+      'event: response.created',
+      'data: {"type":"response.created","response":{"id":"resp_1","model":"o1-pro"}}',
+      '',
+      'event: response.output_text.delta',
+      'data: {"type":"response.output_text.delta","delta":"hi"}',
+      '',
+      'event: response.completed',
+      'data: {"type":"response.completed","response":{"id":"resp_1","model":"o1-pro","usage":{"input_tokens":900,"output_tokens":120,"input_tokens_details":{"cached_tokens":100}}}}',
+      '',
+    ].join('\n');
+    expect(parseUsageFromSSE(sse, 'openai')).toEqual({
+      model: 'o1-pro',
+      inputTokens: 900,
+      outputTokens: 120,
+      cachedInputTokens: 100,
+      cacheCreationTokens: 0,
+    });
   });
 });

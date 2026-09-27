@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   total_tokens INTEGER NOT NULL DEFAULT 0,
   cost_usd NUMERIC(10, 6) NOT NULL DEFAULT 0,
-  request_id TEXT,
+  request_id TEXT NOT NULL,
   latency_ms INTEGER,
   status_code INTEGER,
   created_at TIMESTAMPTZ DEFAULT NOW()
@@ -59,16 +59,139 @@ ON CONFLICT (model) DO UPDATE SET
   updated_at = NOW();
 
 -- User budgets for managed users (set via Admin API)
+-- spend is NUMERIC(12,6): the ledger quantum MUST be finer than a single request's
+-- cost. At 4 decimal places, any charge below $0.0001 (routine for cached reads on
+-- budget models) rounds to zero and spend never advances, so the fail-close budget
+-- gate never trips. 6 dp matches the micro-USD granularity relay bills in.
 CREATE TABLE IF NOT EXISTS user_budgets (
   user_id TEXT PRIMARY KEY,
   budget NUMERIC(10,4) DEFAULT 0,
-  spend NUMERIC(10,4) DEFAULT 0,
+  spend NUMERIC(12,6) DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Micro-USD spend precision (2026-08-25)
+-- Widens spend so a request cheaper than $0.0001 still advances the ledger. Relay
+-- computes cost in integer micro-USD and floors ONCE there (in the user's favor);
+-- at 6 dp the SQL increment stores that value exactly, so user_budgets.spend and
+-- SUM(usage_logs.cost_usd) reconcile per request instead of drifting.
+-- Widening is backward compatible: existing values are preserved, readers parse
+-- more decimals, and old relay builds writing 4-dp amounts keep working.
+ALTER TABLE user_budgets ALTER COLUMN spend TYPE NUMERIC(12,6);
+
+-- Harden the billing ledger against PostgREST exposure (2026-08-27)
+-- On the shared Supabase deployment, PostgREST exposes the `public` schema. Today
+-- anon/authenticated cannot reach these tables (no USAGE granted on schema public,
+-- verified: GET returns 403), but user_budgets still carries over-broad table grants
+-- (INSERT/UPDATE/DELETE to `authenticated`) with NO RLS backstop. A single future
+-- `GRANT USAGE ON SCHEMA public TO authenticated` — a common Supabase default — would
+-- then let any signed-in user rewrite their own budget/spend.
+--
+-- Enabling RLS with no permissive policy is safe here: relay connects as the table
+-- owner `postgres` (BYPASSRLS) and the dassi edge functions use `service_role`
+-- (BYPASSRLS); only anon/authenticated are affected, which is the intent. The REVOKEs
+-- are guarded so this block is a no-op on a standalone relay Postgres that has no
+-- Supabase roles.
+ALTER TABLE user_budgets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_logs   ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON user_budgets FROM authenticated;
+    REVOKE ALL ON usage_logs   FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON user_budgets FROM anon;
+    REVOKE ALL ON usage_logs   FROM anon;
+  END IF;
+END $$;
 
 -- Cache token tracking (2026-03-30)
 -- cached_input_tokens: tokens served from provider cache (billed at reduced rate)
 -- cache_creation_tokens: tokens written to cache (Anthropic: billed at 1.25x)
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cached_input_tokens INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- Per-request billing idempotency (2026-09-02)
+-- usage_logs.request_id is the idempotency key: recordUsage() runs the INSERT
+-- (`ON CONFLICT (request_id) DO NOTHING RETURNING id`) and the spend UPDATE in ONE
+-- statement, with the UPDATE gated on the INSERT — so a retried write after a lost
+-- ack conflicts, charges nothing, and cannot half-apply. Verified on prod before
+-- adding: 416,842 rows, 0 NULL and 0 duplicate request_ids.
+--
+-- RUNBOOK — order matters, and merging to main IS a prod deploy (deploy.yml):
+--   1. Run BOTH statements below on prod BEFORE merging the code that uses them.
+--      CONCURRENTLY cannot run inside a transaction block — run it standalone.
+--   2. Verify the index is VALID. A cancelled/failed CONCURRENTLY build leaves an
+--      INVALID index; `IF NOT EXISTS` then silently skips, and Postgres refuses an
+--      invalid index as an ON CONFLICT arbiter — every insert would error and,
+--      since the charge is gated on the insert, NO request would be billed.
+--        SELECT indisvalid FROM pg_index WHERE indexrelid = 'usage_logs_request_id_key'::regclass;
+--      If false: DROP INDEX usage_logs_request_id_key; and re-run step 1.
+--      A build can also fail because the OLD writer (still running during the
+--      build) inserted a duplicate request_id after a lost ack — the very bug this
+--      index closes. Then: SELECT request_id FROM usage_logs GROUP BY 1 HAVING count(*) > 1;
+--      delete the later row of each pair, reconcile spend, and re-run step 1.
+--   3. SET NOT NULL takes ACCESS EXCLUSIVE and scans the table; behind a long
+--      analytics query it would queue every relay INSERT behind it (which then fail
+--      open = served free). Bound the wait: SET lock_timeout = '2s'; and retry.
+-- Applied to the production Supabase on 2026-09-03 (index VALID, 430,395 rows).
+ALTER TABLE usage_logs ALTER COLUMN request_id SET NOT NULL;
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS usage_logs_request_id_key ON usage_logs(request_id);
+
+-- Purchased credit (2026-09-03)
+-- budget_increments is the purchased-credit ledger, one row per purchase:
+--   * idempotency for POST /admin/users/:id/budget/increment — idempotency_key is
+--     the Stripe payment_intent; the endpoint claims the key and upserts user_budgets
+--     in ONE statement (upsert fed from the claim), so a redelivered webhook adds
+--     nothing twice and can retry until acknowledged;
+--   * remaining_cents is what is left of that purchase. Purchased credit never
+--     expires: user_budgets.budget is ALWAYS plan base + SUM(remaining_cents)/100,
+--     which PUT /budget maintains on every plan write, and a cycle reset first draws
+--     the over-base spend down from purchases FIFO. Purchases survive DELETE /users/:id
+--     (a re-provisioned row picks them back up).
+-- Additive: create BEFORE merging the endpoint (merging to main deploys).
+-- Applied to the production Supabase on 2026-09-03 (table, column, grant).
+CREATE TABLE IF NOT EXISTS budget_increments (
+  idempotency_key TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  delta_cents INTEGER NOT NULL CHECK (delta_cents > 0),
+  remaining_cents INTEGER NOT NULL DEFAULT 0 CHECK (remaining_cents >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE budget_increments ADD COLUMN IF NOT EXISTS remaining_cents INTEGER NOT NULL DEFAULT 0 CHECK (remaining_cents >= 0);
+CREATE INDEX IF NOT EXISTS idx_budget_increments_user_id ON budget_increments(user_id, created_at DESC);
+-- Same PostgREST hardening as the other ledger tables (relay bypasses RLS as owner).
+-- The dassi edge functions (service_role) read remaining_cents to display it.
+ALTER TABLE budget_increments ENABLE ROW LEVEL SECURITY;
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON budget_increments FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON budget_increments FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT SELECT ON budget_increments TO service_role;
+  END IF;
+END $$;
+
+-- Plan base column (2026-09-03) — decouple the base from the materialised ceiling.
+-- user_budgets.budget is ALWAYS plan_base + SUM(budget_increments.remaining_cents)/100.
+-- The base is now stored on its own so a cycle reset reads it directly instead of
+-- deriving it as `budget - SUM(remaining)` — a value a concurrent purchase mutates.
+-- Deriving it caused a purchase landing during a reset to be permanently lost (the
+-- reset overwrote budget from a stale snapshot, and every later reset then mis-derived
+-- the base too low and over-drew the purchase). setUserBudget now runs in a
+-- transaction that locks the row (SELECT ... FOR UPDATE) before touching the ledger.
+-- Backfill: at rollout there are no purchases, so plan_base = budget; the general form
+-- subtracts any purchased remainder and is idempotent (budget already includes it).
+-- Additive: apply BEFORE merging the code that reads/writes plan_base.
+ALTER TABLE user_budgets ADD COLUMN IF NOT EXISTS plan_base NUMERIC(10,4) NOT NULL DEFAULT 0;
+UPDATE user_budgets ub
+   SET plan_base = ub.budget
+     - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0
+ WHERE ub.plan_base IS DISTINCT FROM
+     ub.budget - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0;

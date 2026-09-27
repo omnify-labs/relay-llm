@@ -1,37 +1,69 @@
-import { describe, it, expect } from 'vitest';
-import { calculateCost } from '../billing/pricing.js';
-import { PRICING } from '../billing/litellm-pricing.js';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  calculateCost,
+  calculateCostMicroUsd,
+  buildCeilingPricing,
+  resolveServedPricing,
+  CEILING_PRICING,
+} from '../billing/pricing.js';
+import {
+  PRICING,
+  proxiedEntries,
+  isProxiedEntry,
+  tierPrices,
+  toMicro,
+  type LiteLLMEntry,
+  type ModelPricing,
+} from '../billing/litellm-pricing.js';
 
 // helper: expected simple in+out cost from the live table
 const io = (m: string, inTok: number, outTok: number) =>
   (inTok / 1e6) * PRICING[m].inputPerMillion + (outTok / 1e6) * PRICING[m].outputPerMillion;
 
 describe('calculateCost', () => {
+  it('floors DeepSeek cached and reasoning usage once on the integer billing path', () => {
+    expect(calculateCostMicroUsd('deepseek-flash', 1000, 100, 700, 0)).toBe(214n);
+    expect(calculateCostMicroUsd('deepseek-flash', 0, 0, 0, 0)).toBe(0n);
+    expect(proxiedEntries().some(([model]) => model === 'deepseek-flash')).toBe(true);
+    const deepseek = { litellm_provider: 'deepseek', mode: 'chat', input_cost_per_token: 2e-6 };
+    expect(isProxiedEntry(deepseek)).toBe(true);
+  });
+
+  it('bills Gemini 3.8 Flash input, output, and cached input at published rates', () => {
+    const pricing = PRICING['gemini-3.8-flash'];
+    expect(pricing).toBeDefined();
+    expect(pricing.inputPerMillion).toBe(0.75);
+    expect(pricing.outputPerMillion).toBe(3.75);
+    expect(pricing.cachedInputPerMillion).toBe(0.075);
+    expect(calculateCostMicroUsd('gemini-3.8-flash', 100_000, 1_000, 90_000, 0)).toBe(18_000n);
+    expect(calculateCostMicroUsd('gemini-3.8-flash', 0, 0, 0, 0)).toBe(0n);
+  });
+
   // --- Existing tests (updated signature) ---
 
   it('calculates cost for known OpenAI model', () => {
-    expect(calculateCost('gpt-5.4', 1000, 500, 0, 0)).toBeCloseTo(io('gpt-5.4', 1000, 500), 6);
+    expect(calculateCost('gpt-5.4', 1000, 500, 0, 0)).toBeCloseTo(io('gpt-5.4', 1000, 500), 5);
   });
 
   it('calculates cost for known Anthropic model', () => {
     expect(calculateCost('claude-sonnet-4-5', 2000, 1000, 0, 0))
-      .toBeCloseTo(io('claude-sonnet-4-5', 2000, 1000), 6);
+      .toBeCloseTo(io('claude-sonnet-4-5', 2000, 1000), 5);
   });
 
   it('calculates cost for known Google model', () => {
     expect(calculateCost('gemini-2.0-flash', 10000, 5000, 0, 0))
-      .toBeCloseTo(io('gemini-2.0-flash', 10000, 5000), 6);
+      .toBeCloseTo(io('gemini-2.0-flash', 10000, 5000), 5);
   });
 
   it('gemini-3.5-flash resolves to a real (non-default) price', () => {
     const cost = calculateCost('gemini-3.5-flash', 1_000_000, 1_000_000, 0, 0);
     expect(cost).toBeCloseTo(io('gemini-3.5-flash', 1_000_000, 1_000_000), 4);
-    expect(cost).not.toBeCloseTo(3.0 + 15.0, 4); // not the DEFAULT_PRICING fallback
+    expect(cost).toBeLessThan(CEILING_PRICING.inputPerMillion + CEILING_PRICING.outputPerMillion); // not the ceiling fallback
   });
 
   it('2026-07 lineup models resolve to real (non-default) prices', () => {
     // Reason: these back the refreshed managed model list (dassi PR #2159) —
-    // a missing entry would silently bill at the conservative DEFAULT_PRICING.
+    // a missing entry would silently bill at the fail-closed CEILING pricing.
     // PRICING only contains served models that resolved to a real LiteLLM
     // entry, so membership alone proves the fallback isn't in play. Do NOT
     // compare against the $3/$15 sentinel here: claude-sonnet-5 moves from
@@ -50,7 +82,7 @@ describe('calculateCost', () => {
     // membership: `normalizeEntry()` maps a missing/renamed cache key to 0 via
     // `toMillion(undefined)`, which would bill every cached token at $0 —
     // silently free, and invisible to the generic `inputPerMillion > 0` check.
-    // That is the exact inverse of the DEFAULT_PRICING overcharge this model
+    // That is the exact inverse of the CEILING-pricing overcharge this model
     // was added to avoid, so both directions are pinned here.
     const p = PRICING['gemini-3.5-flash-lite'];
     expect(p, 'gemini-3.5-flash-lite must be in the served pricing table').toBeDefined();
@@ -71,7 +103,8 @@ describe('calculateCost', () => {
     expect(p.inputPerMillion).toBeCloseTo(0.75, 6);
     expect(p.outputPerMillion).toBeCloseTo(3.75, 6);
     expect(p.cachedInputPerMillion).toBeCloseTo(0.075, 6);
-    expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
+    // No cache-write price in the table → billed at the input rate, never $0.
+    expect(p.cacheCreationPerMillion).toBeCloseTo(p.inputPerMillion, 6);
   });
 
   it('gemini-3.6-flash resolves to real rates, with a non-zero cache read', () => {
@@ -87,7 +120,8 @@ describe('calculateCost', () => {
     expect(p.inputPerMillion).toBeCloseTo(0.75, 6);
     expect(p.outputPerMillion).toBeCloseTo(3.75, 6);
     expect(p.cachedInputPerMillion).toBeCloseTo(0.075, 6);
-    expect(p.cacheCreationPerMillion).toBeCloseTo(0, 6);
+    // No cache-write price in the table → billed at the input rate, never $0.
+    expect(p.cacheCreationPerMillion).toBeCloseTo(p.inputPerMillion, 6);
   });
 
   it('applies gemini-3.5-flash-lite cached input discount (90% off)', () => {
@@ -99,10 +133,10 @@ describe('calculateCost', () => {
       (90_000 / 1e6) * p.cachedInputPerMillion +
       (1_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('gemini-3.5-flash-lite', 100_000, 1_000, 90_000, 0);
-    expect(cost).toBeCloseTo(expected, 6);
-    // Reason: failure case — an unserved id falls to DEFAULT_PRICING, which
-    // charges cached reads at the full $3/M. The budget tier must be strictly
-    // cheaper on this shape or the entry is not doing its job.
+    expect(cost).toBeCloseTo(expected, 5);
+    // Reason: failure case — an unserved id falls to CEILING pricing, which charges
+    // cached reads at the most expensive served rate. The budget tier must be
+    // strictly cheaper on this shape or the entry is not doing its job.
     const unserved = calculateCost('gemini-3.5-flash-lite-typo', 100_000, 1_000, 90_000, 0);
     expect(cost).toBeLessThan(unserved);
   });
@@ -115,7 +149,7 @@ describe('calculateCost', () => {
       (10_000 / 1e6) * p.cacheCreationPerMillion +
       (5_000 / 1e6) * p.outputPerMillion;
     const cost = calculateCost('claude-opus-5', 50_000, 5_000, 30_000, 10_000);
-    expect(cost).toBeCloseTo(expected, 6);
+    expect(cost).toBeCloseTo(expected, 5);
   });
 
   it('applies gemini-3.5-flash cached input discount (90% off)', () => {
@@ -132,9 +166,14 @@ describe('calculateCost', () => {
     expect(cost).toBeCloseTo(expected, 4);
   });
 
-  it('uses default pricing for unknown models', () => {
-    const cost = calculateCost('unknown-model-xyz', 1000000, 1000000, 0, 0);
-    expect(cost).toBeCloseTo(3.0 + 15.0, 4);
+  it('bills an unknown model at the ceiling — never cheaper than any served model', () => {
+    // Reason: THE fail-closed guarantee. The proxy forwards whatever model a client
+    // names; an id outside the served table must never bill below what we pay.
+    const unknown = calculateCost('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0);
+    expect(unknown).toBeCloseTo(CEILING_PRICING.inputPerMillion + CEILING_PRICING.outputPerMillion, 4);
+    for (const m of Object.keys(PRICING)) {
+      expect(unknown, `unknown must cost >= ${m}`).toBeGreaterThanOrEqual(io(m, 1_000_000, 1_000_000) - 1e-9);
+    }
   });
 
   it('returns 0 for zero tokens', () => {
@@ -238,7 +277,7 @@ describe('calculateCost', () => {
   it('handles all cache tokens being zero (backward compat)', () => {
     // 1000 input + 500 output, no cache — same as the simple io() helper
     const withZeros = calculateCost('gpt-5.4', 1000, 500, 0, 0);
-    expect(withZeros).toBeCloseTo(io('gpt-5.4', 1000, 500), 6);
+    expect(withZeros).toBeCloseTo(io('gpt-5.4', 1000, 500), 5);
   });
 
   it('guards against cachedInputTokens exceeding total (provider bug)', () => {
@@ -249,5 +288,268 @@ describe('calculateCost', () => {
     expect(cost).toBeGreaterThanOrEqual(0);
     const normalCost = calculateCost('gpt-4.1', 1000, 500, 0, 0);
     expect(cost).toBeLessThanOrEqual(normalCost);
+  });
+});
+
+describe('calculateCostMicroUsd (integer billing path)', () => {
+  it('returns exact integer micro-USD for an unknown model from the ceiling rates', () => {
+    const exp = (1000n * CEILING_PRICING.inputMicro + 500n * CEILING_PRICING.outputMicro) / 1_000_000n;
+    expect(calculateCostMicroUsd('unknown-model-xyz', 1000, 500, 0, 0)).toBe(exp);
+  });
+
+  it('ceiling is >= every component of every proxied entry in the vendored table, deprecated included', () => {
+    // Reason: the proxy forwards any model a client names, so the ceiling must cover
+    // the most expensive thing the providers have ever sold (o1-pro-class), not just
+    // the served list. Computed independently from the raw entries here.
+    const live = proxiedEntries();
+    expect(live.length).toBeGreaterThan(50); // sanity: the table is populated
+    const cap = (v: number | undefined) => (v && v <= 0.005 ? toMicro(v) : 0n);
+    for (const [key, e] of live) {
+      expect(cap(e.input_cost_per_token), key).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
+      expect(cap(e.input_cost_per_token_above_200k_tokens), key).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
+      expect(cap(e.output_cost_per_token), key).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
+      expect(cap(e.output_cost_per_token_above_200k_tokens), key).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
+      expect(cap(e.cache_read_input_token_cost), key).toBeLessThanOrEqual(CEILING_PRICING.cachedInputMicro);
+      expect(cap(e.cache_creation_input_token_cost), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
+      expect(cap(e.cache_creation_input_token_cost_above_1hr), key).toBeLessThanOrEqual(CEILING_PRICING.cacheCreationMicro);
+    }
+    // Reason: no magic numbers — the bound is derived from the same entries the
+    // ceiling is built from, and a row past its LiteLLM deprecation date still counts
+    // (so the ceiling can only ever rise when the table is refreshed).
+    const liveMax = (component: Parameters<typeof tierPrices>[1]) =>
+      live.reduce((m, [, e]) => tierPrices(e, component).reduce((mm, v) => (v <= 0.005 && toMicro(v) > mm ? toMicro(v) : mm), m), 0n);
+    expect(CEILING_PRICING.inputMicro).toBe(liveMax('input') > 30_000_000n ? liveMax('input') : 30_000_000n);
+    expect(CEILING_PRICING.outputMicro).toBe(liveMax('output') > 120_000_000n ? liveMax('output') : 120_000_000n);
+    // Every served model is (trivially) at or below the ceiling too.
+    for (const [m, p] of Object.entries(PRICING)) {
+      expect(p.inputMicro, m).toBeLessThanOrEqual(CEILING_PRICING.inputMicro);
+      expect(p.outputMicro, m).toBeLessThanOrEqual(CEILING_PRICING.outputMicro);
+    }
+  });
+
+  it('buildCeilingPricing takes the max across ALL price fields, including above-200k and 1h-cache tiers', () => {
+    // Reason: synthetic entries make the max logic observable (in the real table one
+    // model dominates every field, so a mutant that ignores above-200k or 1h-cache
+    // fields would otherwise pass unnoticed).
+    const entries: LiteLLMEntry[] = [
+      { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6, cache_read_input_token_cost: 1e-7, cache_creation_input_token_cost: 1.25e-6 },
+      { input_cost_per_token: 5e-6, input_cost_per_token_above_200k_tokens: 9e-4, output_cost_per_token: 1e-5, output_cost_per_token_above_200k_tokens: 2e-3 },
+      { cache_read_input_token_cost_above_200k_tokens: 8e-4, cache_creation_input_token_cost_above_1hr: 3e-3 },
+      // A tier suffix we never enumerated (LiteLLM adds these ad hoc) must still count.
+      { input_cost_per_token_above_272k_tokens: 1.1e-3 },
+    ];
+    const c = buildCeilingPricing(entries);
+    expect(c.inputMicro).toBe(1_100_000_000n); // the un-enumerated 272k tier dominates
+    expect(c.outputMicro).toBe(2_000_000_000n); // above-200k output dominates
+    // cached read: max(field maxes, input ceiling) — no discount for unknown ids
+    expect(c.cachedInputMicro).toBe(1_100_000_000n);
+    // cache write: 1h tier (3e-3) dominates everything
+    expect(c.cacheCreationMicro).toBe(3_000_000_000n);
+  });
+
+  it('buildCeilingPricing ignores corrupt (mis-scaled) rows and never drops below the floor', () => {
+    // A 1e6x mis-scaled row (LiteLLM has shipped these) must not blow the ceiling up…
+    const corrupt: LiteLLMEntry[] = [{ input_cost_per_token: 3, output_cost_per_token: 15 }];
+    const c1 = buildCeilingPricing(corrupt);
+    expect(c1.inputMicro).toBe(30_000_000n); // floor
+    expect(c1.outputMicro).toBe(120_000_000n); // floor
+    // …and an empty table still yields the conservative-high floor, never $0.
+    const c0 = buildCeilingPricing([]);
+    expect(c0.inputMicro).toBe(30_000_000n);
+    expect(c0.cachedInputMicro).toBe(30_000_000n);
+    expect(c0.cacheCreationMicro).toBe(37_500_000n);
+  });
+
+  it('isProxiedEntry admits chat/responses rows of proxied providers and ignores deprecation dates', () => {
+    const base: LiteLLMEntry = { input_cost_per_token: 1e-6, litellm_provider: 'openai', mode: 'chat' };
+    expect(isProxiedEntry(base)).toBe(true);
+    expect(isProxiedEntry({ ...base, mode: 'responses' })).toBe(true);
+    expect(isProxiedEntry({ ...base, litellm_provider: 'vertex_ai-language-models' })).toBe(true);
+    expect(isProxiedEntry({ ...base, litellm_provider: 'bedrock' })).toBe(false);
+    expect(isProxiedEntry({ ...base, mode: 'embedding' })).toBe(false);
+    // A deprecated row can only raise the ceiling; dropping it on a date would let the
+    // ceiling sink below a price the provider may still charge.
+    expect(isProxiedEntry({ ...base, deprecation_date: '2000-01-01' })).toBe(true);
+  });
+
+  it('bills Anthropic -YYYYMMDD snapshot ids from their own row, never the ceiling', () => {
+    // Reason: Anthropic echoes claude-sonnet-4-5-20250929 for a claude-sonnet-4-5 request.
+    // The OpenAI-style date regex never matched, so these fell to the $150/$600 ceiling —
+    // a 50× over-bill against the fail-close budget.
+    const own = resolveServedPricing('claude-sonnet-4-5-20250929');
+    expect(own).toBeDefined();
+    expect(own!.inputMicro).toBe(3_000_000n);
+    expect(own!.outputMicro).toBe(15_000_000n);
+    expect(own).not.toEqual(CEILING_PRICING);
+  });
+
+  it('bills cached tokens at the input rate when a snapshot row carries no cache price', () => {
+    // Reason: gpt-4o-2024-05-13 has no cache_read_input_token_cost in LiteLLM. A missing
+    // field must never become a $0 cached rate — that is the silent under-bill this
+    // whole PR exists to prevent.
+    const own = resolveServedPricing('gpt-4o-2024-05-13')!;
+    expect(own.cachedInputMicro).toBe(own.inputMicro);
+    expect(calculateCostMicroUsd('gpt-4o-2024-05-13', 100_000, 0, 90_000, 0)).toBe(500_000n); // $0.50, no discount
+  });
+
+  it('bills OpenAI dated snapshot ids at the served price (own row when LiteLLM has one), never the ceiling', () => {
+    // Reason: OpenAI echoes e.g. gpt-4o-2024-08-06 for a gpt-4o request. Without
+    // normalization every served OpenAI model would be billed at the ceiling.
+    for (const [dated, bare] of [
+      ['gpt-4o-2024-08-06', 'gpt-4o'],
+      ['gpt-4.1-2025-04-14', 'gpt-4.1'],
+      ['o4-mini-2025-04-16', 'o4-mini'],
+      ['gpt-5.4-2026-03-05', 'gpt-5.4'],
+    ] as const) {
+      expect(PRICING[bare], bare).toBeDefined();
+      expect(resolveServedPricing(dated), dated).toEqual(PRICING[bare]);
+      expect(calculateCostMicroUsd(dated, 1000, 500, 0, 0)).toBe(calculateCostMicroUsd(bare, 1000, 500, 0, 0));
+    }
+    expect(resolveServedPricing('totally-unknown-2026-01-01')).toBeUndefined();
+    expect(resolveServedPricing('gpt-4o-not-a-date')).toBeUndefined();
+  });
+
+  it('bills a differently-priced snapshot from ITS OWN row, never the cheaper stem', () => {
+    // Reason: gpt-4o-2024-05-13 is a live $5/$15 model; mapping it to gpt-4o ($2.50/$10)
+    // would be a silent 37.5% under-bill — the exact failure the ceiling exists to prevent.
+    const own = resolveServedPricing('gpt-4o-2024-05-13');
+    expect(own).toBeDefined();
+    expect(own!.inputMicro).toBe(5_000_000n);
+    expect(own!.outputMicro).toBe(15_000_000n);
+    expect(own).not.toBe(PRICING['gpt-4o']);
+    const cost = calculateCostMicroUsd('gpt-4o-2024-05-13', 1_000_000, 1_000_000, 0, 0);
+    expect(cost).toBe(20_000_000n); // $20, not gpt-4o's $12.50
+    // A snapshot LiteLLM does not know (client-synthesized) maps to the served stem.
+    expect(resolveServedPricing('gpt-4o-2099-01-01')).toBe(PRICING['gpt-4o']);
+  });
+
+  it('keeps the ceiling float and micro encodings in agreement', () => {
+    // Reason: the float fields are DERIVED from the integers, so they cannot drift.
+    expect(CEILING_PRICING.inputPerMillion).toBeCloseTo(Number(CEILING_PRICING.inputMicro) / 1e6, 9);
+    expect(CEILING_PRICING.outputPerMillion).toBeCloseTo(Number(CEILING_PRICING.outputMicro) / 1e6, 9);
+    const floatCost = calculateCost('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0);
+    const microCost = Number(calculateCostMicroUsd('unknown-model-xyz', 1_000_000, 1_000_000, 0, 0)) / 1e6;
+    expect(microCost).toBeCloseTo(floatCost, 6);
+  });
+
+  it('warns once per unknown model id (surfaces allowlist gaps without log spam)', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    calculateCostMicroUsd('never-seen-model-1', 10, 10, 0, 0);
+    calculateCostMicroUsd('never-seen-model-1', 10, 10, 0, 0);
+    calculateCostMicroUsd('never-seen-model-2', 10, 10, 0, 0);
+    const msgs = spy.mock.calls.map((c) => String(c[0]));
+    expect(msgs.filter((m) => m.includes('never-seen-model-1'))).toHaveLength(1);
+    expect(msgs.filter((m) => m.includes('never-seen-model-2'))).toHaveLength(1);
+    spy.mockRestore();
+  });
+
+  it('floors the sub-micro-dollar remainder (user-favoring)', () => {
+    // gemini-3.7-flash cache read is $0.075/M = 75,000 µ$/Mtok (rate pinned above).
+    // 13 cached tokens → 13 × 75,000 = 975,000 < 1e6 → floors to 0 µ$;
+    // 14 cached tokens → 1,050,000 → floors to 1 µ$ (remainder 50,000 discarded).
+    expect(calculateCostMicroUsd('gemini-3.7-flash', 13, 0, 13, 0)).toBe(0n);
+    expect(calculateCostMicroUsd('gemini-3.7-flash', 14, 0, 14, 0)).toBe(1n);
+  });
+
+  it('returns 0n for zero tokens', () => {
+    expect(calculateCostMicroUsd('gpt-5.4', 0, 0, 0, 0)).toBe(0n);
+  });
+
+  it('stays exact where the float product loses integer precision (> 2^53)', () => {
+    // 4e9 output tokens × 15e6 µ rate = 6e16 — above 2^53 (~9.007e15), so the float
+    // product is no longer exactly representable; BigInt keeps it exact.
+    // 6e16 / 1e6 = 6e10 µ$ = $60,000.
+    const tokens = 4_000_000_000;
+    const rate = Number(CEILING_PRICING.outputMicro); // unknown id bills at the ceiling
+    expect(Number.isSafeInteger(tokens * rate)).toBe(false); // pins the premise
+    expect(calculateCostMicroUsd('unknown-model-xyz', 0, tokens, 0, 0)).toBe(
+      (BigInt(tokens) * CEILING_PRICING.outputMicro) / 1_000_000n,
+    );
+  });
+
+  // --- Provider-garbage hardening (BigInt() throws on non-integers) ---
+
+  it.each([
+    ['fractional', 150.5, 10.25],
+    ['Infinity', Infinity, Infinity],
+    ['NaN', NaN, NaN],
+    ['negative', -1000, -500],
+  ])('does not throw on %s token counts, and never charges below zero', (_label, inTok, outTok) => {
+    // Reason: BigInt() throws a RangeError on non-integer/non-finite input. That throw
+    // would escape logUsage BEFORE its Promise.allSettled, skipping both the spend
+    // increment and the usage-log row — free, unaudited usage. Counts are sanitized
+    // instead (floor, clamped at 0), so the call is always safe.
+    let micro: bigint | undefined;
+    expect(() => {
+      micro = calculateCostMicroUsd('gpt-5.4', inTok, outTok, 0, 0);
+    }).not.toThrow();
+    expect(micro).toBeGreaterThanOrEqual(0n);
+  });
+
+  it('floors fractional token counts rather than rounding them up', () => {
+    // 1000.9 input floors to 1000 — identical to a clean 1000-token request.
+    expect(calculateCostMicroUsd('gpt-5.4', 1000.9, 500.9, 0, 0)).toBe(
+      calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0),
+    );
+  });
+
+  it('bills numeric-string counts like the legacy float path (not $0)', () => {
+    // Reason: a provider reporting counts as JSON strings ("1000") was billed by main
+    // via arithmetic coercion. safeTokenCount uses Number(), so we do not regress it to
+    // $0. Typed as number, so cast at the call boundary to model untrusted runtime JSON.
+    const asString = calculateCostMicroUsd('gpt-5.4', '1000' as unknown as number, '500' as unknown as number, 0, 0);
+    expect(asString).toBe(calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0));
+    expect(asString).toBeGreaterThan(0n);
+  });
+
+  it('ignores garbage cache counts without going negative', () => {
+    // Negative cached/cache-creation counts must not inflate the non-cached term
+    // (a -1e9 cached count with an unclamped formula would bill ~$3,000 of input).
+    const garbage = calculateCostMicroUsd('gpt-5.4', 1000, 500, -1_000_000_000, -5.5);
+    expect(garbage).toBe(calculateCostMicroUsd('gpt-5.4', 1000, 500, 0, 0));
+  });
+
+  it('agrees with the legacy float algorithm within 1 µ$ across a random sweep', () => {
+    // Reason: differential test — the integer rewrite must be a refinement of the
+    // old float math (identical up to the intentional floor), never a re-pricing.
+    const legacyFloatCost = (
+      p: ModelPricing,
+      inputTokens: number,
+      outputTokens: number,
+      cachedInputTokens: number,
+      cacheCreationTokens: number,
+    ): number => {
+      const useHighTier = inputTokens > 200_000;
+      const inputRate = (useHighTier && p.inputPerMillionAbove200k != null)
+        ? p.inputPerMillionAbove200k : p.inputPerMillion;
+      const outputRate = (useHighTier && p.outputPerMillionAbove200k != null)
+        ? p.outputPerMillionAbove200k : p.outputPerMillion;
+      const cachedReadRate = (useHighTier && p.cachedInputPerMillionAbove200k != null)
+        ? p.cachedInputPerMillionAbove200k : p.cachedInputPerMillion;
+      const safeCachedInput = Math.min(cachedInputTokens, inputTokens);
+      const safeCacheCreation = Math.min(cacheCreationTokens, inputTokens - safeCachedInput);
+      const nonCachedInput = Math.max(0, inputTokens - safeCachedInput - safeCacheCreation);
+      return (
+        (nonCachedInput / 1e6) * inputRate +
+        (safeCachedInput / 1e6) * cachedReadRate +
+        (safeCacheCreation / 1e6) * p.cacheCreationPerMillion +
+        (outputTokens / 1e6) * outputRate
+      );
+    };
+
+    const models = Object.keys(PRICING);
+    for (let i = 0; i < 100_000; i++) {
+      const model = models[i % models.length];
+      const inputTokens = Math.floor(Math.random() * 2_000_000);
+      const outputTokens = Math.floor(Math.random() * 100_000);
+      const cachedInputTokens = Math.floor(Math.random() * inputTokens * 1.1); // sometimes exceeds input (provider-bug path)
+      const cacheCreationTokens = Math.floor(Math.random() * 50_000);
+      const micro = calculateCostMicroUsd(model, inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens);
+      const legacy = legacyFloatCost(PRICING[model], inputTokens, outputTokens, cachedInputTokens, cacheCreationTokens);
+      const diff = Math.abs(legacy - Number(micro) / 1e6);
+      // 1 µ$ for the intentional floor + 1e-9 slack for the legacy algorithm's own float error
+      expect(diff, `model=${model} in=${inputTokens} out=${outputTokens} cached=${cachedInputTokens} cc=${cacheCreationTokens}`)
+        .toBeLessThanOrEqual(1e-6 + 1e-9);
+    }
   });
 });

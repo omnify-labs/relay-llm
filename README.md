@@ -66,6 +66,12 @@ The trade-off is explicit: you send requests in each provider's **native format*
 - Forwards requests byte-for-byte to the provider
 - Streams responses byte-for-byte back to the client
 - Extracts token counts asynchronously (never blocks the response)
+- Prices each request in exact integer micro-USD (BigInt multiply-adds, one floor
+  division at the µ$ digit), then adds that exact amount to the ledger. Rounding
+  happens once, at the µ$ floor, in the user's favor -- never the house. (On the
+  legacy NUMERIC(10,4) `spend` column, before the widening migration, the stored sum
+  is rounded half-up to $0.0001 per write -- still accumulating, mildly house-favoring
+  by <$0.0001/request until the migration lands.)
 - Logs usage to Postgres
 
 **What RelayLLM does NOT do:**
@@ -197,8 +203,9 @@ DATABASE_URL=postgresql://user:password@host:5432/dbname
 # Server
 PORT=8080
 
-# Hard window (ms) a run may keep spending past budget once admitted. Default 30 min.
-# See "Budget enforcement is per-run" below.
+# Sliding idle window (ms) for an admitted run — refreshed on each call, so it only
+# lapses after the run goes quiet. Backstop for a lost end signal (see "Budget
+# enforcement is per-run"); the normal reclamation is POST /v1/runs/:runId/end.
 RUN_ADMISSION_TTL_MS=1800000
 ```
 
@@ -214,19 +221,37 @@ meant a user whose credit ran out mid-task got a 402 on the next call and lost t
 run's partial work. Now the "out of credit" stop lands at a **task boundary**: the
 *next* run's first call is refused, before any visible work.
 
-Spend is still recorded on every call, so an admitted run simply overshoots and the
-following run is refused.
+The current run continues to completion regardless of how much it spends — a task is
+never interrupted mid-run. Spend is still recorded on every call, so the run overshoots
+and only the *following* run is refused.
 
-Bounds on that overshoot:
+A run stays admitted until it ends. Two reclamation paths:
 
-- **`RUN_ADMISSION_TTL_MS`** (default 30 min) is a hard cap, not an idle timer. A run
-  still active at expiry is re-checked: under budget it re-admits, over budget it stops.
-- **8 concurrent admitted runs per user.** Beyond that, runs simply are not admitted
-  and keep per-call gating. `runId` is client-supplied, so this caps both worst-case
-  overspend and the memory an attacker can pin.
+- **End signal (primary).** The extension calls `POST /v1/runs/:runId/end` when the
+  agent run completes, dropping that run's admission at once so the user's next run is
+  gated immediately. Scoped to the caller's own `userId`; idempotent.
+- **Keepalive.** While a run is blocked on a human (approval card, `ask_user`) it makes
+  no LLM calls, so the extension's approval heartbeat posts `POST /v1/runs/:runId/keepalive`
+  (every 60 s) to slide the window. It only refreshes an existing admission — it never
+  admits — so it cannot bypass the gate.
+- **Idle window (backstop).** `RUN_ADMISSION_TTL_MS` (default 30 min) is a *sliding*
+  window refreshed on every admitted call and every keepalive — so a live run is never
+  cut off, however long or costly. It lapses only after a run goes quiet (e.g. a browser
+  crash that never sent the end signal). **Invariant:** it must exceed the longest
+  *silent* pause of a live run — one tool call (5-min proxy-tool/REPL budget) plus a
+  streamed reply. Never run it near 5 min in production: that re-gates runs mid-task.
+
+Other bounds:
+
+- **8 concurrent admitted runs per user.** Beyond that, runs keep per-call gating.
+  `runId` is client-supplied, so this caps the memory an attacker can pin.
 - **Admin writes revoke immediately.** `PUT /users/:user_id/budget` and
   `DELETE /users/:user_id` drop the user's admissions, so lowering or zeroing a budget
-  takes effect on the user's very next call rather than after the window closes.
+  takes effect on the user's very next call.
+
+By design there is no per-run overspend *amount* cap: an admitted run may finish over
+budget by whatever it spends before it ends. This is the product choice — never cut off
+a task in progress; gate the next one. A per-run in-flight cap is out of scope.
 
 Requests **without** an `X-Dassi-Run-Id` header keep per-call enforcement unchanged, so
 older clients are unaffected.
@@ -256,6 +281,18 @@ curl -X PUT http://localhost:8080/admin/users/user-uuid/budget \
 # Remove a user
 curl -X DELETE http://localhost:8080/admin/users/user-uuid \
   -H "Authorization: Bearer $RELAY_ADMIN_SECRET"
+
+# `budget` is the PLAN base. Purchased credit (below) is kept on top of it on every
+# write, and reset_spend first draws the over-base spend down from those purchases —
+# so a renewal, tier change or cancellation never wipes credit the user paid for.
+
+# Add purchased credit ($10.00) — exactly once per idempotency key
+curl -X POST https://relay.example.com/admin/users/USER_ID/budget/increment \
+  -H "Authorization: Bearer $RELAY_ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"delta_cents": 1000, "idempotency_key": "pi_3XyZ..."}'
+# → {"user_id":"USER_ID","applied":true,"budget":60,"spend":50.0214}
+# A replayed key returns applied:false with the current ledger and adds nothing.
 ```
 
 ## Design Principles
@@ -283,7 +320,7 @@ src/
     budget.ts           # Per-run budget admission (gate once at run start)
     run-admission.ts    # In-memory admitted-run store (TTL + per-user cap)
     usage.ts            # Async token usage logging
-    pricing.ts          # Model pricing table
+    pricing.ts          # calculateCostMicroUsd (integer µ$ billing path) + display wrapper
   db/
     client.ts           # Postgres connection
     queries.ts          # Usage + budget queries

@@ -13,6 +13,7 @@ import { adminAuthMiddleware } from './admin/middleware.js';
 import { adminApp } from './admin/handler.js';
 import { budgetMiddleware } from './billing/budget.js';
 import { pruneAllUsers } from './billing/run-admission.js';
+import { runRoutes } from './billing/run-routes.js';
 import { loadEnv } from './config/env.js';
 
 const env = loadEnv();
@@ -32,6 +33,10 @@ const adminRoutes = new Hono();
 adminRoutes.use('*', adminAuthMiddleware);
 adminRoutes.route('/', adminApp);
 app.route('/admin', adminRoutes);
+
+// Run lifecycle (end / keepalive) — JWT auth; handlers live in billing/run-routes.ts.
+app.use('/v1/runs/*', authMiddleware);
+app.route('/', runRoutes);
 
 // LLM proxy routes — JWT auth + budget check + passthrough
 app.all('/v1/openai/*', authMiddleware, budgetMiddleware, proxyHandler('openai'));
