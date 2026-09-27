@@ -119,7 +119,9 @@ forwards native request and response bytes without format translation.
 ### Dassi Pro / DeepSeek V4.1 Flash
 
 Provision `DEEPSEEK_API_KEY` in the server environment before deploying this
-version; startup validation requires it. Clients use their existing managed JWT
+version; startup validation requires it. The current SSH/Docker deployment reads
+`/srv/relay-llm/.env` on the Relay host. The DeepSeek account also needs a funded
+API balance. Clients use their existing managed JWT
 at `POST /v1/deepseek/chat/completions` with model `deepseek-flash`. The provider
 key stays on the server. Authentication, run admission, and credit enforcement
 use the existing middleware.
