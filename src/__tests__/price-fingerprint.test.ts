@@ -23,7 +23,7 @@ describe('servedFingerprint', () => {
   it('keeps the managed DeepSeek tariff fixed when upstream pricing changes', () => {
     const fingerprint = servedFingerprint(vendored);
     const parsed = JSON.parse(fingerprint);
-    expect(parsed['deepseek-flash'].inputMicro).toBe('300000');
+    expect(parsed['deepseek-flash'].inputMicro).toBe('1500000');
     expect(parsed['deepseek-flash'].cachedInputMicro).toBe('6000');
     expect(servedFingerprint({
       ...vendored,

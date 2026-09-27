@@ -69,7 +69,7 @@ describe('DeepSeek managed requests', () => {
     expect(response.headers.get('Authorization')).toBeNull();
     await vi.waitFor(() => expect(recordUsage).toHaveBeenCalledOnce());
     expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
-      userId: 'test-user', costMicroUsd: 214,
+      userId: 'test-user', costMicroUsd: 574,
       provider: 'deepseek', model: 'deepseek-flash', inputTokens: 1000,
       outputTokens: 100, cachedInputTokens: 700, cacheCreationTokens: 0,
     }));
