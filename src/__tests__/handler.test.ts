@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { Hono } from 'hono';
 import { SignJWT } from 'jose';
 import { authMiddleware } from '../auth/jwt.js';
-import { budgetMiddleware } from '../billing/budget.js';
+import { budgetMiddleware, paidModelMiddleware } from '../billing/budget.js';
+import { admitRun, revokeUser } from '../billing/run-admission.js';
 import { loadEnv } from '../config/env.js';
-import { getUserBudget, recordUsage } from '../db/queries.js';
+import { getUserBudget, hasPaidSubscription, recordUsage } from '../db/queries.js';
 
 vi.mock('../db/queries.js', () => ({
   getUserBudget: vi.fn(),
+  hasPaidSubscription: vi.fn(),
   recordUsage: vi.fn().mockResolvedValue('charged'),
 }));
 
@@ -21,6 +23,8 @@ describe('DeepSeek managed requests', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
+    revokeUser('test-user');
+    vi.mocked(hasPaidSubscription).mockResolvedValue(true);
     vi.stubEnv('JWT_SECRET', 'test-deepseek-jwt-secret');
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-provider-key');
     vi.stubGlobal('fetch', upstream);
@@ -28,7 +32,7 @@ describe('DeepSeek managed requests', () => {
     token = await new SignJWT({}).setProtectedHeader({ alg: 'HS256' }).setSubject('test-user')
       .setExpirationTime('1h').sign(new TextEncoder().encode(process.env.JWT_SECRET));
     app = new Hono();
-    app.all('/v1/deepseek/*', authMiddleware, budgetMiddleware, proxyHandler('deepseek'));
+    app.all('/v1/deepseek/*', authMiddleware, paidModelMiddleware, budgetMiddleware, proxyHandler('deepseek'));
   });
 
   afterEach(() => {
@@ -74,6 +78,33 @@ describe('DeepSeek managed requests', () => {
   it('rejects missing authentication before accessing the upstream', async () => {
     const response = await app.request('/v1/deepseek/chat/completions', { method: 'POST' });
     expect(response.status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('rejects trial users before checking budget or contacting DeepSeek', async () => {
+    vi.mocked(hasPaidSubscription).mockResolvedValue(false);
+    const response = await request();
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'Dassi Pro requires an active paid subscription. Choose Dassi Flash or Dassi Lite.' });
+    expect(getUserBudget).not.toHaveBeenCalled();
+    expect(upstream).not.toHaveBeenCalled();
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+
+  it('does not let an already admitted run bypass loss of paid access', async () => {
+    admitRun('test-user', 'previously-paid');
+    vi.mocked(hasPaidSubscription).mockResolvedValue(false);
+    const response = await app.request('/v1/deepseek/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'X-Dassi-Run-Id': 'previously-paid' },
+    });
+    expect(response.status).toBe(403);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when paid access cannot be checked', async () => {
+    vi.mocked(hasPaidSubscription).mockRejectedValue(new Error('database unavailable'));
+    expect((await request()).status).toBe(503);
     expect(upstream).not.toHaveBeenCalled();
   });
 

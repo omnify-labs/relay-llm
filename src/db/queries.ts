@@ -11,6 +11,17 @@ export interface UserBudget {
   planBase: number;
 }
 
+/**
+ * Whether this account has an active paid plan, using the shared billing policy.
+ * @param userId - Authenticated user ID; never taken from the request body.
+ * @returns True only for an active paid subscription or unexpired one-time plan.
+ */
+export async function hasPaidSubscription(userId: string): Promise<boolean> {
+  const sql = getDb();
+  const rows = await sql`SELECT public.has_paid_subscription(${userId}::uuid) AS allowed`;
+  return rows[0]?.allowed === true;
+}
+
 export interface UsageLogInsert {
   userId: string;
   provider: string;

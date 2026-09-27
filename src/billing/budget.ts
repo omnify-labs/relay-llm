@@ -9,7 +9,7 @@
  */
 
 import type { MiddlewareHandler } from 'hono';
-import { getUserBudget } from '../db/queries.js';
+import { getUserBudget, hasPaidSubscription } from '../db/queries.js';
 import { isRunAdmitted, admitRun } from './run-admission.js';
 
 /**
@@ -20,6 +20,24 @@ import { isRunAdmitted, admitRun } from './run-admission.js';
  * no-mid-task-402 grace.
  */
 const FREE_TIER_PLAN_BASE_CEILING = 10;
+
+/**
+ * Require a current paid subscription for premium provider routes.
+ * Runs before budget admission so an admitted run cannot bypass a downgrade.
+ * @param c - Hono context with the authenticated userId.
+ * @param next - Budget and provider middleware, invoked only for paid accounts.
+ * @returns 403 for unpaid accounts or 503 when eligibility cannot be verified.
+ */
+export const paidModelMiddleware: MiddlewareHandler = async (c, next) => {
+  try {
+    if (!(await hasPaidSubscription(c.get('userId') as string))) {
+      return c.json({ error: 'Dassi Pro requires an active paid subscription. Choose Dassi Flash or Dassi Lite.' }, 403);
+    }
+  } catch {
+    return c.json({ error: 'Unable to verify paid model access. Please try again.' }, 503);
+  }
+  await next();
+};
 
 /**
  * Budget check middleware.
