@@ -22,11 +22,17 @@ const io = (m: string, inTok: number, outTok: number) =>
 
 describe('calculateCost', () => {
   it('floors DeepSeek cached and reasoning usage once on the integer billing path', () => {
-    expect(calculateCostMicroUsd('deepseek-flash', 1000, 100, 700, 0)).toBe(214n);
+    expect(calculateCostMicroUsd('deepseek-flash', 1000, 100, 700, 0)).toBe(574n);
     expect(calculateCostMicroUsd('deepseek-flash', 0, 0, 0, 0)).toBe(0n);
     expect(proxiedEntries().some(([model]) => model === 'deepseek-flash')).toBe(true);
     const deepseek = { litellm_provider: 'deepseek', mode: 'chat', input_cost_per_token: 2e-6 };
     expect(isProxiedEntry(deepseek)).toBe(true);
+  });
+
+  it('charges $1.50 per million Pro input tokens without repricing cache or output', () => {
+    expect(calculateCostMicroUsd('deepseek-flash', 1_000_000, 0, 0, 0)).toBe(1_500_000n);
+    expect(calculateCostMicroUsd('deepseek-flash', 1_000_000, 0, 1_000_000, 0)).toBe(6_000n);
+    expect(calculateCostMicroUsd('deepseek-flash', 0, 1_000_000, 0, 0)).toBe(1_200_000n);
   });
 
   it('bills Gemini 3.8 Flash input, output, and cached input at published rates', () => {

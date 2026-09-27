@@ -134,12 +134,10 @@ the paid-access gate. It grants execution to server callers only and is also
 used by the model-list endpoint. No credit-balance threshold is used for access.
 
 Usage accounting reads `prompt_cache_hit_tokens` for cache discounts and bills
-`completion_tokens` once, including reasoning. Dassi Pro uses fixed standard
-rates: $0.30/M uncached input, $0.006/M cached input, $1.20/M output. Off-peak
+`completion_tokens` once, including reasoning. Dassi Pro uses a fixed managed
+tariff: $1.50/M uncached input, $0.006/M cached input, $1.20/M output. Off-peak
 provider discounts are not passed through. The tariff is explicit in
-`src/billing/litellm-pricing.ts` because the vendored price table predates this
-model. Source: [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/),
-verified September 26, 2026.
+`src/billing/litellm-pricing.ts` and survives provider price-table syncs.
 
 Deploy Relay before the companion Dassi model-list function and extension.
 Verify a real authenticated streamed tool-call conversation and its usage log

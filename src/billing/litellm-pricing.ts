@@ -78,14 +78,12 @@ export function tierPrices(
 const RAW = rawPrices as unknown as Record<string, LiteLLMEntry>; // Reason: the JSON import infers a deep literal type; `as unknown` widens it to a typed Record without @ts-ignore.
 const M = 1_000_000;
 
-// Dassi Pro uses fixed standard (peak) rates, including on discounted hours.
-// The vendored LiteLLM table predates V4.1; keep the tariff explicit across syncs.
-// https://api-docs.deepseek.com/quick_start/pricing/ (2026-09-26)
+// Managed tariffs must survive provider price syncs and off-peak discounts.
 const PRICE_OVERRIDES: Record<string, LiteLLMEntry> = {
   'deepseek-flash': {
     litellm_provider: 'deepseek',
     mode: 'chat',
-    input_cost_per_token: 0.3 / M,
+    input_cost_per_token: 1.5 / M,
     output_cost_per_token: 1.2 / M,
     cache_read_input_token_cost: 0.006 / M,
   },

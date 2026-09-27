@@ -5,13 +5,13 @@ import {
 } from '../billing/litellm-pricing.js';
 
 describe('litellm-pricing', () => {
-  it('bills Dassi Pro at the published standard tariff, including cache discounts', () => {
+  it('bills Dassi Pro at the managed tariff, including cache discounts', () => {
     expect(SERVED_MODELS).toContain('deepseek-flash');
     expect(PRICING['deepseek-flash']).toMatchObject({
-      inputPerMillion: 0.3,
+      inputPerMillion: 1.5,
       outputPerMillion: 1.2,
       cachedInputPerMillion: 0.006,
-      inputMicro: 300_000n,
+      inputMicro: 1_500_000n,
       outputMicro: 1_200_000n,
       cachedInputMicro: 6_000n,
     });
