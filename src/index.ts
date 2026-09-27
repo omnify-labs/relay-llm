@@ -42,6 +42,7 @@ app.route('/', runRoutes);
 app.all('/v1/openai/*', authMiddleware, budgetMiddleware, proxyHandler('openai'));
 app.all('/v1/anthropic/*', authMiddleware, budgetMiddleware, proxyHandler('anthropic'));
 app.all('/v1/google/*', authMiddleware, budgetMiddleware, proxyHandler('google'));
+app.all('/v1/deepseek/*', authMiddleware, budgetMiddleware, proxyHandler('deepseek'));
 
 // 404 for everything else
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

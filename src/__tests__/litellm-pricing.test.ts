@@ -5,6 +5,17 @@ import {
 } from '../billing/litellm-pricing.js';
 
 describe('litellm-pricing', () => {
+  it('bills Dassi Pro at the published standard tariff, including cache discounts', () => {
+    expect(SERVED_MODELS).toContain('deepseek-flash');
+    expect(PRICING['deepseek-flash']).toMatchObject({
+      inputPerMillion: 0.3,
+      outputPerMillion: 1.2,
+      cachedInputPerMillion: 0.006,
+      inputMicro: 300_000n,
+      outputMicro: 1_200_000n,
+      cachedInputMicro: 6_000n,
+    });
+  });
   it('converts per-token to per-million (×1e6)', () => {
     const p = normalizeEntry({ input_cost_per_token: 3e-6, output_cost_per_token: 1.5e-5 });
     expect(p.inputPerMillion).toBeCloseTo(3.0, 6);
@@ -109,7 +120,7 @@ describe('litellm-pricing', () => {
     vi.doMock('../../vendor/litellm/model_prices_and_context_window.json', () => ({ default: {} }));
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const mod = await import('../billing/litellm-pricing.js');
-    expect(mod.missingServedModels()).toEqual([...mod.SERVED_MODELS]);
+    expect(mod.missingServedModels()).toEqual(mod.SERVED_MODELS.filter((model) => model !== 'deepseek-flash'));
     expect(spy).toHaveBeenCalledWith(expect.stringContaining('LiteLLM pricing MISSING'));
     spy.mockRestore();
     vi.doUnmock('../../vendor/litellm/model_prices_and_context_window.json');

@@ -281,18 +281,22 @@ export function parseUsageFromBody(body: string, provider: ProviderName): Parsed
     const json = JSON.parse(body);
 
     switch (provider) {
+      case 'deepseek':
       case 'openai': {
         // Reason: Chat Completions reports prompt_tokens/completion_tokens; the
         // Responses API reports input_tokens/output_tokens (with
         // input_tokens_details.cached_tokens). Missing the second shape logged the
         // pro-tier Responses-only models at 0 tokens — billed $0.
         const u = json.usage;
+        if (provider === 'deepseek' && !u) return null;
         return {
           model: json.model,
           inputTokens: u?.prompt_tokens || u?.input_tokens || 0,
           outputTokens: u?.completion_tokens || u?.output_tokens || 0,
           cachedInputTokens:
-            u?.prompt_tokens_details?.cached_tokens || u?.input_tokens_details?.cached_tokens || 0,
+            provider === 'deepseek'
+              ? u?.prompt_cache_hit_tokens || 0
+              : u?.prompt_tokens_details?.cached_tokens || u?.input_tokens_details?.cached_tokens || 0,
           cacheCreationTokens: 0,
         };
       }
@@ -352,6 +356,7 @@ export function parseUsageFromSSE(sseText: string, provider: ProviderName): Pars
       const json = JSON.parse(data);
 
       switch (provider) {
+        case 'deepseek':
         case 'openai': {
           // Reason: Responses API streams carry model + usage under `response.*` on the
           // terminal `response.completed` event, not at the top level like Chat.
@@ -364,7 +369,9 @@ export function parseUsageFromSSE(sseText: string, provider: ProviderName): Pars
               inputTokens: u.prompt_tokens || u.input_tokens || 0,
               outputTokens: u.completion_tokens || u.output_tokens || 0,
               cachedInputTokens:
-                u.prompt_tokens_details?.cached_tokens || u.input_tokens_details?.cached_tokens || 0,
+                provider === 'deepseek'
+                  ? u.prompt_cache_hit_tokens || 0
+                  : u.prompt_tokens_details?.cached_tokens || u.input_tokens_details?.cached_tokens || 0,
               cacheCreationTokens: 0,
             };
           }

@@ -20,6 +20,17 @@ const vendored = JSON.parse(readFileSync(VENDORED, 'utf8')) as Record<
 >;
 
 describe('servedFingerprint', () => {
+  it('keeps the managed DeepSeek tariff fixed when upstream pricing changes', () => {
+    const fingerprint = servedFingerprint(vendored);
+    const parsed = JSON.parse(fingerprint);
+    expect(parsed['deepseek-flash'].inputMicro).toBe('300000');
+    expect(parsed['deepseek-flash'].cachedInputMicro).toBe('6000');
+    expect(servedFingerprint({
+      ...vendored,
+      'deepseek-flash': { input_cost_per_token: 1 },
+    })).toBe(fingerprint);
+  });
+
   it('serializes the real vendored table without throwing', () => {
     expect(() => servedFingerprint(vendored)).not.toThrow();
     expect(servedFingerprint(vendored).length).toBeGreaterThan(0);

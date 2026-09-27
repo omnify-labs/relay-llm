@@ -3,7 +3,7 @@
  * Maps route prefixes to upstream provider URLs and auth methods.
  */
 
-export type ProviderName = 'openai' | 'anthropic' | 'google';
+export type ProviderName = 'openai' | 'anthropic' | 'google' | 'deepseek';
 
 export interface ProviderConfig {
   /** Base URL to forward requests to */
@@ -25,6 +25,12 @@ export interface ProviderConfig {
  *   Upstream:  POST https://api.openai.com/v1/chat/completions
  */
 export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
+  deepseek: {
+    upstream: 'https://api.deepseek.com',
+    apiKeyEnvVar: 'DEEPSEEK_API_KEY',
+    authMethod: 'bearer',
+    routePrefix: '/v1/deepseek',
+  },
   openai: {
     upstream: 'https://api.openai.com',
     apiKeyEnvVar: 'OPENAI_API_KEY',

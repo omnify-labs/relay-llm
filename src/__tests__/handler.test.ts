@@ -1,11 +1,116 @@
-import { describe, it, expect } from 'vitest';
-import { parseUsageFromBody, parseUsageFromSSE } from '../proxy/handler.js';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { Hono } from 'hono';
+import { SignJWT } from 'jose';
+import { authMiddleware } from '../auth/jwt.js';
+import { budgetMiddleware } from '../billing/budget.js';
+import { loadEnv } from '../config/env.js';
+import { getUserBudget, recordUsage } from '../db/queries.js';
 
-/**
- * Tests the REAL usage parsers exported from handler.ts (previously a hand-copied
- * re-implementation, which could not catch drift such as the Responses-API shape).
- */
+vi.mock('../db/queries.js', () => ({
+  getUserBudget: vi.fn(),
+  recordUsage: vi.fn().mockResolvedValue('charged'),
+}));
 
+import { parseUsageFromBody, parseUsageFromSSE, proxyHandler } from '../proxy/handler.js';
+
+describe('DeepSeek managed requests', () => {
+  let token: string;
+  let app: Hono;
+  const upstream = vi.fn<typeof fetch>();
+  const usage = { prompt_tokens: 1000, completion_tokens: 100, prompt_cache_hit_tokens: 700, completion_tokens_details: { reasoning_tokens: 60 } };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.stubEnv('JWT_SECRET', 'test-deepseek-jwt-secret');
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-provider-key');
+    vi.stubGlobal('fetch', upstream);
+    vi.mocked(getUserBudget).mockResolvedValue({ budget: 10, spend: 0, planBase: 10 });
+    token = await new SignJWT({}).setProtectedHeader({ alg: 'HS256' }).setSubject('test-user')
+      .setExpirationTime('1h').sign(new TextEncoder().encode(process.env.JWT_SECRET));
+    app = new Hono();
+    app.all('/v1/deepseek/*', authMiddleware, budgetMiddleware, proxyHandler('deepseek'));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  function request(body = '{ "model": "deepseek-flash", "stream": true }') {
+    return app.request('/v1/deepseek/chat/completions', {
+      method: 'POST', body,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    });
+  }
+
+  it.each([true, false])('forwards bytes unchanged and charges cached/reasoning usage once (stream=%s)', async (stream) => {
+    const payload = { model: 'deepseek-flash', usage };
+    const responseBody = stream
+      ? `: keep-alive\n\ndata: ${JSON.stringify({ model: 'deepseek-flash', choices: [] })}\n\ndata: ${JSON.stringify({ usage })}\n\ndata: [DONE]\n\n`
+      : JSON.stringify(payload);
+    let forwarded = '';
+    upstream.mockImplementationOnce(async (_input, init) => {
+      forwarded = await new Response(init?.body).text();
+      return new Response(responseBody, { headers: { 'Content-Type': stream ? 'text/event-stream' : 'application/json' } });
+    });
+    const requestBody = ` { "model": "deepseek-flash", "stream": ${stream}, "messages": [], "thinking": {"type":"enabled"} } `;
+    const response = await request(requestBody);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(responseBody);
+    expect(forwarded).toBe(requestBody);
+    expect(upstream).toHaveBeenCalledOnce();
+    const [url, init] = upstream.mock.calls[0];
+    expect(url).toBe('https://api.deepseek.com/chat/completions');
+    expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer test-provider-key');
+    expect(response.headers.get('Authorization')).toBeNull();
+    await vi.waitFor(() => expect(recordUsage).toHaveBeenCalledOnce());
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'test-user', costMicroUsd: 214,
+      provider: 'deepseek', model: 'deepseek-flash', inputTokens: 1000,
+      outputTokens: 100, cachedInputTokens: 700, cacheCreationTokens: 0,
+    }));
+  });
+
+  it('rejects missing authentication before accessing the upstream', async () => {
+    const response = await app.request('/v1/deepseek/chat/completions', { method: 'POST' });
+    expect(response.status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('rejects exhausted credits before accessing the upstream', async () => {
+    vi.mocked(getUserBudget).mockResolvedValueOnce({ budget: 10, spend: 10, planBase: 10 });
+    expect((await request()).status).toBe(402);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on a budget database error', async () => {
+    vi.mocked(getUserBudget).mockRejectedValueOnce(new Error('database unavailable'));
+    expect((await request()).status).toBe(503);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it('passes upstream rate-limit errors through without charging', async () => {
+    const body = '{"error":{"message":"Rate limit reached"}}';
+    upstream.mockResolvedValueOnce(new Response(body, { status: 429, headers: { 'Content-Type': 'application/json' } }));
+    const response = await request();
+    expect(response.status).toBe(429);
+    expect(await response.text()).toBe(body);
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+
+  it('requires a server-side DeepSeek key at startup', () => {
+    for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY', 'RELAY_ADMIN_SECRET']) vi.stubEnv(key, 'test');
+    expect(loadEnv().DEEPSEEK_API_KEY).toBe('test-provider-key');
+    vi.stubEnv('DEEPSEEK_API_KEY', '');
+    expect(() => loadEnv()).toThrow('Missing required env var: DEEPSEEK_API_KEY');
+  });
+
+  it('ignores incomplete streams and malformed usage responses', () => {
+    expect(parseUsageFromSSE(': keep-alive\n\ndata: invalid\n\ndata: [DONE]\n', 'deepseek')).toBeNull();
+    expect(parseUsageFromBody('{"error":"unavailable"}', 'deepseek')).toBeNull();
+    expect(parseUsageFromBody('invalid', 'deepseek')).toBeNull();
+  });
+});
 
 describe('parseUsageFromBody', () => {
   it('parses OpenAI response usage', () => {
@@ -147,11 +252,6 @@ describe('parseUsageFromBody', () => {
     });
   });
 });
-
-/**
- * SSE parsing tests for cache token extraction.
- * Re-implements parseUsageFromSSE locally for testing.
- */
 
 describe('parseUsageFromSSE — cache token extraction', () => {
   it('extracts OpenAI cached tokens from streaming final chunk', () => {
