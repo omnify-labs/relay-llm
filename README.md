@@ -123,8 +123,15 @@ version; startup validation requires it. The current SSH/Docker deployment reads
 `/srv/relay-llm/.env` on the Relay host. The DeepSeek account also needs a funded
 API balance. Clients use their existing managed JWT
 at `POST /v1/deepseek/chat/completions` with model `deepseek-flash`. The provider
-key stays on the server. Authentication, run admission, and credit enforcement
-use the existing middleware.
+key stays on the server. Dassi Pro requires an active paid subscription (including
+Lite); trial and credit-only accounts receive HTTP 403. Relay checks the shared
+`public.has_paid_subscription(uuid)` policy on every DeepSeek request before
+budget admission, so a cached run cannot bypass a downgrade. Database failures
+return HTTP 503. Existing authentication and credit enforcement still apply.
+
+Apply Dassi's `20260927000100_paid_model_access.sql` migration before deploying
+the paid-access gate. It grants execution to server callers only and is also
+used by the model-list endpoint. No credit-balance threshold is used for access.
 
 Usage accounting reads `prompt_cache_hit_tokens` for cache discounts and bills
 `completion_tokens` once, including reasoning. Dassi Pro uses fixed standard

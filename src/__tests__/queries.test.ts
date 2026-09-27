@@ -28,6 +28,7 @@ import {
   setUserBudget,
   deleteUserBudget,
   getUserBudget,
+  hasPaidSubscription,
   incrementUserBudget,
   recordUsage,
   type UsageLogInsert,
@@ -57,6 +58,27 @@ function reconstructSql(call: unknown[]): { sql: string; values: unknown[] } {
     .trim();
   return { sql, values };
 }
+
+describe('hasPaidSubscription', () => {
+  it('uses the shared server policy for the authenticated user', async () => {
+    mockSqlFn.mockResolvedValue([{ allowed: true }]);
+    expect(await hasPaidSubscription('user-42')).toBe(true);
+    expect(reconstructSql(mockSqlFn.mock.calls[0])).toEqual({
+      sql: 'SELECT public.has_paid_subscription($0::uuid) AS allowed',
+      values: ['user-42'],
+    });
+  });
+
+  it.each([{ rows: [] }, { rows: [{ allowed: false }] }, { rows: [{ allowed: null }] }])('denies absent or false eligibility (%j)', async ({ rows }) => {
+    mockSqlFn.mockResolvedValue(rows);
+    expect(await hasPaidSubscription('user-42')).toBe(false);
+  });
+
+  it('propagates policy lookup errors so the route can fail closed', async () => {
+    mockSqlFn.mockRejectedValue(new Error('policy unavailable'));
+    await expect(hasPaidSubscription('user-42')).rejects.toThrow('policy unavailable');
+  });
+});
 
 describe('setUserBudget (plan_base is the base of record; a locked transaction rematerialises the ceiling)', () => {
   it('locks the row FIRST, then writes plan_base + budget = base + remaining, spend untouched (resetSpend:false)', async () => {
