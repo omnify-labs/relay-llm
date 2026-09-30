@@ -208,5 +208,10 @@ UPDATE user_budgets ub
 --   2. Add the column below. Nullable with no default, so it is a catalog-only change,
 --      but it still needs a brief ACCESS EXCLUSIVE lock; behind a long analytics query
 --      every relay INSERT would queue. Bound it: SET lock_timeout = '2s'; and retry.
---   3. Merge the code that reads and writes it.
+--   3. Build the index the workspace owner report reads by (Dassi's workspace_report()).
+--      CONCURRENTLY cannot run in a transaction block; run it standalone and check
+--      it is VALID afterwards, as for usage_logs_request_id_key above.
+--   4. Merge the code that reads and writes it.
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_account_id TEXT;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_logs_billing_account
+  ON usage_logs(billing_account_id, created_at DESC) WHERE billing_account_id IS NOT NULL;
