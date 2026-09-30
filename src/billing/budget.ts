@@ -73,6 +73,10 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
       return c.json({ error: 'Budget exceeded' }, 402);
     }
 
+    if (budget.memberBlocked) {
+      return c.json({ error: 'Member limit reached' }, 402);
+    }
+
     // Reason: grant the run-scoped no-mid-task-402 grace to PAID tiers only. A free/trial
     // user (plan base ≤ ceiling) is never admitted, so every one of their requests re-checks
     // budget above and 402s at the cap — a continuous loop can't outrun a $2–$5 grant through

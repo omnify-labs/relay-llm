@@ -171,14 +171,22 @@ describe('getUserBudget', () => {
     mockSqlFn.mockResolvedValueOnce([]);
     await getUserBudget('u1');
     const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
-    expect(sql).toBe('SELECT budget, spend, plan_base FROM user_budgets WHERE user_id = public.billing_account_id($0) LIMIT 1');
-    expect(values).toEqual(['u1']);
+    expect(sql).toBe(
+      'SELECT budget, spend, plan_base, public.workspace_member_blocked($0) AS member_blocked FROM user_budgets ' +
+        'WHERE user_id = public.billing_account_id($1) LIMIT 1',
+    );
+    expect(values).toEqual(['u1', 'u1']);
+  });
+
+  it('reports a member blocked by their monthly limit', async () => {
+    mockSqlFn.mockResolvedValueOnce([{ budget: '500', spend: '1', plan_base: '500', member_blocked: true }]);
+    expect((await getUserBudget('u1'))?.memberBlocked).toBe(true);
   });
 
   it('returns budget record when user exists', async () => {
     mockSqlFn.mockResolvedValueOnce([{ budget: '25.0000', spend: '3.5000', plan_base: '5.0000' }]);
     const result = await getUserBudget('u1');
-    expect(result).toEqual({ budget: 25, spend: 3.5, planBase: 5 });
+    expect(result).toEqual({ budget: 25, spend: 3.5, planBase: 5, memberBlocked: false });
   });
 
   it('returns null when user has no budget', async () => {
@@ -193,7 +201,7 @@ describe('getUserBudget', () => {
     // false and silently unlimit the user.
     mockSqlFn.mockResolvedValueOnce([{ budget: null, spend: 'not-a-number', plan_base: null }]);
     const result = await getUserBudget('u1');
-    expect(result).toEqual({ budget: 0, spend: 0, planBase: 0 });
+    expect(result).toEqual({ budget: 0, spend: 0, planBase: 0, memberBlocked: false });
   });
 
   it('propagates a DB error', async () => {
@@ -233,8 +241,10 @@ describe('recordUsage (atomic insert + charge)', () => {
         '$1, (SELECT id FROM payer), $2, $3, $4, $5, $6, $7, $8, $9::numeric / 1000000, $10, $11, $12 ) ' +
         'ON CONFLICT (request_id) DO NOTHING RETURNING id ), ' +
         'charged AS ( UPDATE user_budgets SET spend = spend + trunc($13::numeric / 1000000, 6), updated_at = NOW() ' +
-        'WHERE user_id = (SELECT id FROM payer) AND EXISTS (SELECT 1 FROM ins) RETURNING user_id ) ' +
-        'SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged',
+        'WHERE user_id = (SELECT id FROM payer) AND EXISTS (SELECT 1 FROM ins) RETURNING user_id ), ' +
+        'member AS ( SELECT public.workspace_member_charge($14, trunc($15::numeric / 1000000, 6)) AS n FROM ins ) ' +
+        'SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged, ' +
+        '(SELECT coalesce(sum(n), 0) FROM member) AS member_counted',
     );
     expect(values).toEqual([
       record.userId,
@@ -242,6 +252,8 @@ describe('recordUsage (atomic insert + charge)', () => {
       record.inputTokens, record.outputTokens, record.totalTokens,
       record.cachedInputTokens, record.cacheCreationTokens,
       record.costMicroUsd, record.requestId, record.latencyMs, record.statusCode,
+      record.costMicroUsd,
+      record.userId,
       record.costMicroUsd,
     ]);
   });

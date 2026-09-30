@@ -28,7 +28,7 @@ describe('DeepSeek managed requests', () => {
     vi.stubEnv('JWT_SECRET', 'test-deepseek-jwt-secret');
     vi.stubEnv('DEEPSEEK_API_KEY', 'test-provider-key');
     vi.stubGlobal('fetch', upstream);
-    vi.mocked(getUserBudget).mockResolvedValue({ budget: 10, spend: 0, planBase: 10 });
+    vi.mocked(getUserBudget).mockResolvedValue({ budget: 10, spend: 0, planBase: 10, memberBlocked: false });
     token = await new SignJWT({}).setProtectedHeader({ alg: 'HS256' }).setSubject('test-user')
       .setExpirationTime('1h').sign(new TextEncoder().encode(process.env.JWT_SECRET));
     app = new Hono();
@@ -109,7 +109,7 @@ describe('DeepSeek managed requests', () => {
   });
 
   it('rejects exhausted credits before accessing the upstream', async () => {
-    vi.mocked(getUserBudget).mockResolvedValueOnce({ budget: 10, spend: 10, planBase: 10 });
+    vi.mocked(getUserBudget).mockResolvedValueOnce({ budget: 10, spend: 10, planBase: 10, memberBlocked: false });
     expect((await request()).status).toBe(402);
     expect(upstream).not.toHaveBeenCalled();
   });

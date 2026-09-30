@@ -142,6 +142,14 @@ endpoints take that account id, so `/admin/users/<workspace id>/budget` sets a
 workspace pool. Apply Dassi's `20260930000100_workspace_seats.sql` and the
 matching `docs/schema.sql` step before deploying.
 
+A workspace owner can set a monthly limit per member. The budget check calls
+Dassi's `public.workspace_member_blocked(text)` and answers HTTP 402
+`Member limit reached` when the member is at their limit and the pool still has
+budget; an empty pool still answers `Budget exceeded`. `recordUsage` advances the
+member's monthly counter with `public.workspace_member_charge(text, numeric)` in the
+same statement that charges the pool, only when the usage row was inserted. Apply
+Dassi's `20261001000200_workspace_member_caps.sql` before deploying.
+
 Usage accounting reads `prompt_cache_hit_tokens` for cache discounts and bills
 `completion_tokens` once, including reasoning. Dassi Pro uses a fixed managed
 tariff: $1.50/M uncached input, $0.006/M cached input, $1.20/M output. Off-peak
