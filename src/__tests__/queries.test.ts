@@ -167,6 +167,14 @@ describe('deleteUserBudget', () => {
 });
 
 describe('getUserBudget', () => {
+  it('reads the budget of the account paying for the user, not a row keyed by the user', async () => {
+    mockSqlFn.mockResolvedValueOnce([]);
+    await getUserBudget('u1');
+    const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
+    expect(sql).toBe('SELECT budget, spend, plan_base FROM user_budgets WHERE user_id = public.billing_account_id($0) LIMIT 1');
+    expect(values).toEqual(['u1']);
+  });
+
   it('returns budget record when user exists', async () => {
     mockSqlFn.mockResolvedValueOnce([{ budget: '25.0000', spend: '3.5000', plan_base: '5.0000' }]);
     const result = await getUserBudget('u1');
@@ -210,7 +218,7 @@ describe('recordUsage (atomic insert + charge)', () => {
     statusCode: 200,
   };
 
-  it('issues ONE statement that inserts the row and charges spend only when the row was inserted', async () => {
+  it('issues ONE statement that logs the user, charges the account paying for them, and only when the row was inserted', async () => {
     // Reason: pin the whole statement. The idempotency and atomicity live in the SQL
     // text: ON CONFLICT (request_id) DO NOTHING, the UPDATE gated on EXISTS(ins), the
     // never-round-up trunc(…, 6), the row-scoped WHERE user_id, and the positional
@@ -219,20 +227,22 @@ describe('recordUsage (atomic insert + charge)', () => {
     await recordUsage(record);
     const { sql, values } = reconstructSql(mockSqlFn.mock.calls[0]);
     expect(sql).toBe(
-      'WITH ins AS ( INSERT INTO usage_logs ( user_id, provider, model, input_tokens, output_tokens, total_tokens, ' +
+      'WITH payer AS ( SELECT public.billing_account_id($0) AS id ), ' +
+        'ins AS ( INSERT INTO usage_logs ( user_id, billing_account_id, provider, model, input_tokens, output_tokens, total_tokens, ' +
         'cached_input_tokens, cache_creation_tokens, cost_usd, request_id, latency_ms, status_code ) VALUES ( ' +
-        '$0, $1, $2, $3, $4, $5, $6, $7, $8::numeric / 1000000, $9, $10, $11 ) ' +
+        '$1, (SELECT id FROM payer), $2, $3, $4, $5, $6, $7, $8, $9::numeric / 1000000, $10, $11, $12 ) ' +
         'ON CONFLICT (request_id) DO NOTHING RETURNING id ), ' +
-        'charged AS ( UPDATE user_budgets SET spend = spend + trunc($12::numeric / 1000000, 6), updated_at = NOW() ' +
-        'WHERE user_id = $13 AND EXISTS (SELECT 1 FROM ins) RETURNING user_id ) ' +
+        'charged AS ( UPDATE user_budgets SET spend = spend + trunc($13::numeric / 1000000, 6), updated_at = NOW() ' +
+        'WHERE user_id = (SELECT id FROM payer) AND EXISTS (SELECT 1 FROM ins) RETURNING user_id ) ' +
         'SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged',
     );
     expect(values).toEqual([
+      record.userId,
       record.userId, record.provider, record.model,
       record.inputTokens, record.outputTokens, record.totalTokens,
       record.cachedInputTokens, record.cacheCreationTokens,
       record.costMicroUsd, record.requestId, record.latencyMs, record.statusCode,
-      record.costMicroUsd, record.userId,
+      record.costMicroUsd,
     ]);
   });
 

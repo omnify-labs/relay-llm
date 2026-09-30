@@ -195,3 +195,18 @@ UPDATE user_budgets ub
      - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0
  WHERE ub.plan_base IS DISTINCT FROM
      ub.budget - COALESCE((SELECT SUM(remaining_cents) FROM budget_increments bi WHERE bi.user_id = ub.user_id), 0) / 100.0;
+
+-- Workspace pools (2026-09-30) — a seated workspace member is charged to the
+-- workspace's shared budget. The payer is Dassi's public.billing_account_id(sub):
+-- the workspace id for a seat holder, else the sub itself, so every existing
+-- user_budgets / budget_increments row keeps its key. usage_logs keeps user_id
+-- (who made the request) and records billing_account_id (whose budget paid), which
+-- cannot be reconstructed later once seats change. NULL on rows written before this.
+--
+-- RUNBOOK — merging to main IS a prod deploy (deploy.yml):
+--   1. Apply Dassi's 20260930000100_workspace_seats.sql (defines billing_account_id).
+--   2. Add the column below. Nullable with no default, so it is a catalog-only change,
+--      but it still needs a brief ACCESS EXCLUSIVE lock; behind a long analytics query
+--      every relay INSERT would queue. Bound it: SET lock_timeout = '2s'; and retry.
+--   3. Merge the code that reads and writes it.
+ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_account_id TEXT;

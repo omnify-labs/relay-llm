@@ -39,8 +39,9 @@ export interface UsageLogInsert {
 }
 
 /**
- * Get a user's current spend and budget from user_budgets table.
- * Returns null if user has no budget record.
+ * Get the spend and budget of the account that pays for this user — their workspace's
+ * shared pool when they hold a seat, else their own row (Dassi's billing_account_id()).
+ * Returns null if that account has no budget record.
  *
  * @param userId - User ID from JWT sub claim
  * @returns Budget record or null
@@ -50,7 +51,7 @@ export async function getUserBudget(userId: string): Promise<UserBudget | null> 
   const rows = await sql`
     SELECT budget, spend, plan_base
     FROM user_budgets
-    WHERE user_id = ${userId}
+    WHERE user_id = public.billing_account_id(${userId})
     LIMIT 1
   `;
   if (rows.length === 0) return null;
@@ -82,6 +83,9 @@ export type RecordUsageOutcome = 'charged' | 'replay' | 'uncharged';
  * a failure and either double-charged or silently under-charged.
  *
  * @param record - Usage data to log; costMicroUsd is the integer micro-USD charge.
+ * The payer is resolved inside the same statement, so the row records exactly the
+ * account that was charged even if the user's seat changes afterwards.
+ *
  * @returns 'charged' when this call inserted the row and charged spend; 'replay' when
  *   the request_id was already recorded (and therefore already charged); 'uncharged'
  *   when the row was inserted but no user_budgets row exists to charge.
@@ -91,14 +95,17 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
   // Reason: trunc(…, 6) keeps the "never round up" guarantee explicit; the /1000000
   // division is exact in NUMERIC (see the 2026-08-25 spend precision migration).
   const rows = await sql`
-    WITH ins AS (
+    WITH payer AS (
+      SELECT public.billing_account_id(${record.userId}) AS id
+    ),
+    ins AS (
       INSERT INTO usage_logs (
-        user_id, provider, model,
+        user_id, billing_account_id, provider, model,
         input_tokens, output_tokens, total_tokens,
         cached_input_tokens, cache_creation_tokens,
         cost_usd, request_id, latency_ms, status_code
       ) VALUES (
-        ${record.userId}, ${record.provider}, ${record.model},
+        ${record.userId}, (SELECT id FROM payer), ${record.provider}, ${record.model},
         ${record.inputTokens}, ${record.outputTokens}, ${record.totalTokens},
         ${record.cachedInputTokens}, ${record.cacheCreationTokens},
         ${record.costMicroUsd}::numeric / 1000000, ${record.requestId}, ${record.latencyMs}, ${record.statusCode}
@@ -109,7 +116,7 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
     charged AS (
       UPDATE user_budgets
       SET spend = spend + trunc(${record.costMicroUsd}::numeric / 1000000, 6), updated_at = NOW()
-      WHERE user_id = ${record.userId} AND EXISTS (SELECT 1 FROM ins)
+      WHERE user_id = (SELECT id FROM payer) AND EXISTS (SELECT 1 FROM ins)
       RETURNING user_id
     )
     SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged
