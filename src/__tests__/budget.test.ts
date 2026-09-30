@@ -44,7 +44,7 @@ beforeEach(() => __resetAdmissionsForTests());
 
 describe('budgetMiddleware', () => {
   it('allows request when spend is under budget', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10, planBase: 50 });
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 25, spend: 10, planBase: 50, memberBlocked: false });
     const app = buildTestApp();
 
     const res = await app.request('/test');
@@ -61,6 +61,19 @@ describe('budgetMiddleware', () => {
     expect(res.status).toBe(402);
     const body = await res.json();
     expect(body.error).toBe('Budget exceeded');
+  });
+
+  it('rejects a member over their monthly limit with its own reason while the pool still has budget', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 500, spend: 10, planBase: 500, memberBlocked: true });
+    const res = await buildTestApp().request('/test');
+    expect(res.status).toBe(402);
+    expect((await res.json()).error).toBe('Member limit reached');
+  });
+
+  it('reports the empty pool, not the member limit, when both apply', async () => {
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 500, spend: 500, planBase: 500, memberBlocked: true });
+    const res = await buildTestApp().request('/test');
+    expect((await res.json()).error).toBe('Budget exceeded');
   });
 
   it('rejects with 402 when spend exceeds budget', async () => {

@@ -9,6 +9,8 @@ export interface UserBudget {
   budget: number;
   /** The plan's base ceiling (tier grant, excl. purchased credit). Free/trial is $2–$5. */
   planBase: number;
+  /** A workspace member who has reached the monthly limit their owner set. */
+  memberBlocked: boolean;
 }
 
 /**
@@ -49,7 +51,7 @@ export interface UsageLogInsert {
 export async function getUserBudget(userId: string): Promise<UserBudget | null> {
   const sql = getDb();
   const rows = await sql`
-    SELECT budget, spend, plan_base
+    SELECT budget, spend, plan_base, public.workspace_member_blocked(${userId}) AS member_blocked
     FROM user_budgets
     WHERE user_id = public.billing_account_id(${userId})
     LIMIT 1
@@ -59,6 +61,7 @@ export async function getUserBudget(userId: string): Promise<UserBudget | null> 
     budget: parseFloat(rows[0].budget) || 0,
     spend: parseFloat(rows[0].spend) || 0,
     planBase: parseFloat(rows[0].plan_base) || 0,
+    memberBlocked: rows[0].member_blocked === true,
   };
 }
 
@@ -84,7 +87,9 @@ export type RecordUsageOutcome = 'charged' | 'replay' | 'uncharged';
  *
  * @param record - Usage data to log; costMicroUsd is the integer micro-USD charge.
  * The payer is resolved inside the same statement, so the row records exactly the
- * account that was charged even if the user's seat changes afterwards.
+ * account that was charged even if the user's seat changes afterwards. A seated
+ * member's monthly counter (their owner's per-member limit) is advanced in the same
+ * statement, only when the row was inserted, so a replay never counts twice.
  *
  * @returns 'charged' when this call inserted the row and charged spend; 'replay' when
  *   the request_id was already recorded (and therefore already charged); 'uncharged'
@@ -118,8 +123,13 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
       SET spend = spend + trunc(${record.costMicroUsd}::numeric / 1000000, 6), updated_at = NOW()
       WHERE user_id = (SELECT id FROM payer) AND EXISTS (SELECT 1 FROM ins)
       RETURNING user_id
+    ),
+    member AS (
+      SELECT public.workspace_member_charge(${record.userId}, trunc(${record.costMicroUsd}::numeric / 1000000, 6)) AS n
+      FROM ins
     )
-    SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged
+    SELECT (SELECT count(*) FROM ins) AS inserted, (SELECT count(*) FROM charged) AS charged,
+      (SELECT coalesce(sum(n), 0) FROM member) AS member_counted
   `;
   const row = rows[0];
   // The outer SELECT always yields exactly one row; anything else is a driver fault
