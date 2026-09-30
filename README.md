@@ -133,6 +133,15 @@ Apply Dassi's `20260927000100_paid_model_access.sql` migration before deploying
 the paid-access gate. It grants execution to server callers only and is also
 used by the model-list endpoint. No credit-balance threshold is used for access.
 
+A member holding a seat in a Dassi team workspace draws from that workspace's
+shared budget. The budget check and the charge both resolve the payer through
+Dassi's `public.billing_account_id(text)`: the workspace id for a seat holder,
+otherwise the user's own id. `usage_logs.user_id` stays the person who made the
+request; `usage_logs.billing_account_id` records whose budget paid. Admin budget
+endpoints take that account id, so `/admin/users/<workspace id>/budget` sets a
+workspace pool. Apply Dassi's `20260930000100_workspace_seats.sql` and the
+matching `docs/schema.sql` step before deploying.
+
 Usage accounting reads `prompt_cache_hit_tokens` for cache discounts and bills
 `completion_tokens` once, including reasoning. Dassi Pro uses a fixed managed
 tariff: $1.50/M uncached input, $0.006/M cached input, $1.20/M output. Off-peak
