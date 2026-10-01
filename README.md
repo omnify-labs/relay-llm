@@ -245,9 +245,12 @@ meant a user whose credit ran out mid-task got a 402 on the next call and lost t
 run's partial work. Now the "out of credit" stop lands at a **task boundary**: the
 *next* run's first call is refused, before any visible work.
 
-The current run continues to completion regardless of how much it spends — a task is
-never interrupted mid-run. Spend is still recorded on every call, so the run overshoots
-and only the *following* run is refused.
+A **paid** run continues to completion regardless of how much it spends. A **free/trial**
+run (plan base ≤ $10) may overshoot by at most `TRIAL_RUN_OVERRUN_USD` ($2, 200 credits):
+every one of its calls is re-checked against budget + $2, so the crossing task usually
+finishes while a runaway loop still stops. The ceiling is on the account's total spend, so
+concurrent trial runs share it. Spend is recorded on every call, and only the *following*
+run is refused once spend reaches the budget.
 
 A run stays admitted until it ends. Two reclamation paths:
 
@@ -273,9 +276,9 @@ Other bounds:
   `DELETE /users/:user_id` drop the user's admissions, so lowering or zeroing a budget
   takes effect on the user's very next call.
 
-By design there is no per-run overspend *amount* cap: an admitted run may finish over
-budget by whatever it spends before it ends. This is the product choice — never cut off
-a task in progress; gate the next one. A per-run in-flight cap is out of scope.
+Paid runs have no overspend *amount* cap: an admitted paid run may finish over budget by
+whatever it spends before it ends. Free/trial accounts are capped at budget +
+`TRIAL_RUN_OVERRUN_USD`, because free signups are cheap to mass-produce.
 
 Requests **without** an `X-Dassi-Run-Id` header keep per-call enforcement unchanged, so
 older clients are unaffected.

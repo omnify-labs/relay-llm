@@ -30,8 +30,10 @@ This repository hosts **Relay LLM** — a thin, transparent LLM proxy that forwa
   stop lands at the next run's first call, a clean task boundary.
 - This is a **deliberate** trade-off, not a hole in the rule above. Spend is still
   recorded on **every** call (fully accounted, still fail-closed on a DB error). An
-  admitted run runs to **completion** — it is never cut off mid-run, and by design there
-  is no per-run overspend *amount* cap; the gate lands on the **next** run.
+  admitted **paid** run runs to **completion** — it is never cut off mid-run and has no
+  overspend *amount* cap; the gate lands on the **next** run. A **free/trial** account
+  (plan base ≤ $10) is admitted too, but its calls are re-checked against budget +
+  `TRIAL_RUN_OVERRUN_USD` ($2), so the crossing task can finish while a loop stops.
 - A run stays admitted until it ends. Reclamation: the extension's explicit end signal
   (`POST /v1/runs/:runId/end`, primary — drops the admission at once) and a **sliding**
   idle window (`RUN_ADMISSION_TTL_MS`, refreshed on every admitted call — an active run
