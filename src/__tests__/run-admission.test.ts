@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   isRunAdmitted,
+  admittedOverrunUsd,
   admitRun,
   endRun,
   touchRun,
@@ -199,5 +200,21 @@ describe('run-admission — cap, revoke, sweep', () => {
     pruneAllUsers(TTL - 1);
     expect(isRunAdmitted('u1', 'run-a', TTL - 1)).toBe(true);
     expect(admissionCountForTests()).toBe(1);
+  });
+});
+
+describe('run-admission — overrun allowance', () => {
+  it('returns the allowance a run was admitted with, and null when not admitted', () => {
+    admitRun('u', 'trial', 0, 2);
+    admitRun('u', 'paid', 0);
+    expect(admittedOverrunUsd('u', 'trial', 1)).toBe(2);
+    expect(admittedOverrunUsd('u', 'paid', 1)).toBe(Infinity);
+    expect(admittedOverrunUsd('u', 'unknown', 1)).toBeNull();
+  });
+
+  it('keeps the allowance when the keepalive slides the window', () => {
+    admitRun('u', 'trial', 0, 2);
+    expect(touchRun('u', 'trial', TTL - 1)).toBe(true);
+    expect(admittedOverrunUsd('u', 'trial', 2 * TTL - 2)).toBe(2);
   });
 });

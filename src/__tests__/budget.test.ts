@@ -12,7 +12,7 @@ vi.mock('../db/queries.js', () => ({
   getUserBudget: (...args: unknown[]) => mockGetUserBudget(...args),
 }));
 
-import { budgetMiddleware } from '../billing/budget.js';
+import { budgetMiddleware, TRIAL_RUN_OVERRUN_USD } from '../billing/budget.js';
 import {
   admitRun,
   isRunAdmitted,
@@ -174,48 +174,60 @@ describe('budgetMiddleware — per-run admission', () => {
 });
 
 /**
- * Free/trial tier (plan base ≤ ceiling): the run-scoped grace is withheld, so every
- * request re-checks budget and a runaway loop can't outspend its small cap through the
- * admission window (the abuse this closes).
+ * Free/trial tier (plan base ≤ ceiling): a run admitted under budget may finish, but the
+ * account's total spend stops at budget + TRIAL_RUN_OVERRUN_USD, so a runaway loop is still
+ * bounded while a real user's crossing task is not cut off mid-run.
  */
-describe('budgetMiddleware — free/trial hard enforcement', () => {
-  it('does NOT admit a free-tier run (no mid-task grace)', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 0, planBase: 5 });
+describe('budgetMiddleware — free/trial bounded overrun', () => {
+  const trial = (spend: number) => ({ budget: 2, spend, planBase: 2, memberBlocked: false });
+  const call = (app: Hono, runId: string) => app.request('/test', { headers: { 'X-Dassi-Run-Id': runId } });
+
+  it('lets the trial run that crosses its budget keep going within the allowance', async () => {
     const app = buildTestApp();
-    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'free-run' } });
-    expect(res.status).toBe(200);
-    // The whole point: it is NOT parked in the admission window.
-    expect(isRunAdmitted('user-42', 'free-run')).toBe(false);
+    mockGetUserBudget.mockResolvedValueOnce(trial(1.9));
+    expect((await call(app, 'trial-run')).status).toBe(200);
+    mockGetUserBudget.mockResolvedValueOnce(trial(2 + TRIAL_RUN_OVERRUN_USD - 0.01));
+    expect((await call(app, 'trial-run')).status).toBe(200);
   });
 
-  it('402s a free-tier run once it hits its cap, even mid-run (re-checked every call)', async () => {
+  it('stops the same trial run once total spend reaches budget + allowance', async () => {
     const app = buildTestApp();
-    // First call: under cap → passes, but is not admitted.
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 4, planBase: 5 });
-    let res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'free-run' } });
-    expect(res.status).toBe(200);
-    // Next call of the SAME run: now at cap → 402 (a paid admitted run would have bypassed).
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 5, spend: 5, planBase: 5 });
-    res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'free-run' } });
-    expect(res.status).toBe(402);
+    mockGetUserBudget.mockResolvedValueOnce(trial(1.9));
+    await call(app, 'trial-run');
+    mockGetUserBudget.mockResolvedValueOnce(trial(2 + TRIAL_RUN_OVERRUN_USD));
+    expect((await call(app, 'trial-run')).status).toBe(402);
   });
 
-  it('a paid run keeps the grace: admitted, then over-budget calls still pass', async () => {
+  it('re-checks every call of an admitted trial run against the database', async () => {
     const app = buildTestApp();
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 200, spend: 10, planBase: 200 });
-    let res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'paid-run' } });
-    expect(res.status).toBe(200);
-    expect(isRunAdmitted('user-42', 'paid-run')).toBe(true);
-    // Second call bypasses the budget query entirely (grace), so no mock is consumed.
-    res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'paid-run' } });
-    expect(res.status).toBe(200);
+    mockGetUserBudget.mockResolvedValue(trial(1));
+    await call(app, 'trial-run');
+    await call(app, 'trial-run');
+    expect(mockGetUserBudget).toHaveBeenCalledTimes(2);
   });
 
-  it('a plan base exactly at the ceiling is still treated as free (not admitted)', async () => {
-    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 0, planBase: 10 });
+  it('refuses a NEW trial run while over budget, even with another run still in its allowance', async () => {
     const app = buildTestApp();
-    const res = await app.request('/test', { headers: { 'X-Dassi-Run-Id': 'edge-run' } });
-    expect(res.status).toBe(200);
-    expect(isRunAdmitted('user-42', 'edge-run')).toBe(false);
+    mockGetUserBudget.mockResolvedValueOnce(trial(1.9));
+    await call(app, 'first-run');
+    mockGetUserBudget.mockResolvedValueOnce(trial(2.5));
+    expect((await call(app, 'second-run')).status).toBe(402);
+    expect(isRunAdmitted('user-42', 'second-run')).toBe(false);
+  });
+
+  it('treats a plan base exactly at the ceiling as trial: bounded, not unlimited', async () => {
+    const app = buildTestApp();
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 0, planBase: 10, memberBlocked: false });
+    await call(app, 'edge-run');
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 10, spend: 10 + TRIAL_RUN_OVERRUN_USD, planBase: 10, memberBlocked: false });
+    expect((await call(app, 'edge-run')).status).toBe(402);
+  });
+
+  it('a paid run keeps the unlimited grace: admitted, then never re-checked', async () => {
+    const app = buildTestApp();
+    mockGetUserBudget.mockResolvedValueOnce({ budget: 200, spend: 10, planBase: 200, memberBlocked: false });
+    expect((await call(app, 'paid-run')).status).toBe(200);
+    expect((await call(app, 'paid-run')).status).toBe(200);
+    expect(mockGetUserBudget).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,8 +1,8 @@
 /**
  * Budget enforcement middleware.
- * Per-RUN enforcement: a run is budget-gated once at its first call, then its
- * subsequent calls pass without re-checking (no mid-task 402). Requests with
- * no X-Dassi-Run-Id header keep the legacy per-call behavior.
+ * A run is budget-gated at its first call. Once admitted it may finish: a paid run is
+ * never re-checked, and a free/trial run is re-checked against budget plus a bounded
+ * allowance. Requests with no X-Dassi-Run-Id header keep the legacy per-call behavior.
  *
  * Design: Fail closed — if the budget check fails (DB error), reject the request
  * to prevent runaway spend. This is intentional.
@@ -10,16 +10,20 @@
 
 import type { MiddlewareHandler } from 'hono';
 import { getUserBudget, hasPaidSubscription } from '../db/queries.js';
-import { isRunAdmitted, admitRun } from './run-admission.js';
+import { admittedOverrunUsd, admitRun } from './run-admission.js';
 
 /**
  * Plan base at or below this (USD) is a free/trial user — the small starter grant
- * ($2–$5); the cheapest paid tier (Starter) is $50. Free/trial users are NEVER admitted
- * into the run-scoped grace, so budget is re-checked on EVERY request and a runaway loop
- * cannot outspend its $2–$5 cap through the admission window. Paid tiers keep the
- * no-mid-task-402 grace.
+ * ($2–$5); the cheapest paid tier (Starter) is $50.
  */
 const FREE_TIER_PLAN_BASE_CEILING = 10;
+
+/**
+ * USD a free/trial account may spend past its budget so the run that crosses it can
+ * finish (200 credits). The ceiling is on the account's total spend, so a runaway loop or
+ * concurrent runs share it and stop at budget + this amount.
+ */
+export const TRIAL_RUN_OVERRUN_USD = 2;
 
 /**
  * Require a current paid subscription for premium provider routes.
@@ -42,9 +46,11 @@ export const paidModelMiddleware: MiddlewareHandler = async (c, next) => {
 /**
  * Budget check middleware.
  *
- * Gates a run's FIRST call on the user's spend vs budget, then admits the rest of that
- * run without re-checking, so a task is never interrupted mid-flight when credit runs
- * out. Requests without an `X-Dassi-Run-Id` header keep legacy per-call enforcement.
+ * Gates a run's FIRST call on the user's spend vs budget, then admits the run so it can
+ * finish: a paid run is never re-checked, and a free/trial run may spend up to
+ * {@link TRIAL_RUN_OVERRUN_USD} past the budget before it is stopped. A new run is only
+ * admitted while spend is under budget. Requests without an `X-Dassi-Run-Id` header keep
+ * legacy per-call enforcement.
  *
  * @param c - Hono context; requires `userId` set by auth, reads the `X-Dassi-Run-Id` header.
  * @param next - Downstream handler, invoked only when the request is allowed.
@@ -55,10 +61,8 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
   const runId = c.req.header('x-dassi-run-id');
 
   try {
-    // Reason: in-flight admitted run — allow without re-checking budget so a task is
-    // never interrupted mid-run once it has been admitted. Only PAID runs are ever admitted
-    // (see below), so a hit here is a paying user mid-task, not a free/trial loop.
-    if (runId && isRunAdmitted(userId, runId)) {
+    const overrunUsd = runId ? admittedOverrunUsd(userId, runId) : null;
+    if (overrunUsd === Infinity) {
       await next();
       return;
     }
@@ -69,7 +73,7 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
       return c.json({ error: 'No budget record found. Please set up billing.' }, 403);
     }
 
-    if (budget.spend >= budget.budget) {
+    if (budget.spend >= budget.budget + (overrunUsd ?? 0)) {
       return c.json({ error: 'Budget exceeded' }, 402);
     }
 
@@ -77,12 +81,10 @@ export const budgetMiddleware: MiddlewareHandler = async (c, next) => {
       return c.json({ error: 'Member limit reached' }, 402);
     }
 
-    // Reason: grant the run-scoped no-mid-task-402 grace to PAID tiers only. A free/trial
-    // user (plan base ≤ ceiling) is never admitted, so every one of their requests re-checks
-    // budget above and 402s at the cap — a continuous loop can't outrun a $2–$5 grant through
-    // the admission window. For a paid run, admit it so the rest of THIS run is not
-    // interrupted mid-task; it stays admitted until it ends (endRun) or idles out.
-    if (runId && budget.planBase > FREE_TIER_PLAN_BASE_CEILING) admitRun(userId, runId);
+    if (runId && overrunUsd === null) {
+      const allowance = budget.planBase > FREE_TIER_PLAN_BASE_CEILING ? Infinity : TRIAL_RUN_OVERRUN_USD;
+      admitRun(userId, runId, Date.now(), allowance);
+    }
 
     await next();
   } catch (error) {

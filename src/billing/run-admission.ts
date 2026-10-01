@@ -59,18 +59,24 @@ export const MAX_ADMITTED_RUNS_PER_USER = 8;
  * per-user entry would let the newer run evict the older one, whose next call would then be
  * re-budget-checked and 402'd mid-task.
  */
-const admitted = new Map<string, Map<string, number>>();
+interface Admission {
+  expiresAt: number;
+  /** USD the run may spend past the budget; Infinity = never re-checked (paid). */
+  overrunUsd: number;
+}
+
+const admitted = new Map<string, Map<string, Admission>>();
 
 /**
  * Drop this user's idled-out runs, and the user entry itself once empty.
  *
  * @param userId - The authenticated user.
- * @param runs - That user's run -> expiry map.
+ * @param runs - That user's run -> admission map.
  * @param now - Current time in ms.
  */
-function pruneUser(userId: string, runs: Map<string, number>, now: number): void {
-  for (const [runId, expiresAt] of runs) {
-    if (now >= expiresAt) runs.delete(runId);
+function pruneUser(userId: string, runs: Map<string, Admission>, now: number): void {
+  for (const [runId, admission] of runs) {
+    if (now >= admission.expiresAt) runs.delete(runId);
   }
   if (runs.size === 0) admitted.delete(userId);
 }
@@ -88,20 +94,33 @@ function pruneUser(userId: string, runs: Map<string, number>, now: number): void
  * @returns True when the run is admitted (and its idle window was just refreshed).
  */
 export function isRunAdmitted(userId: string, runId: string, now: number = Date.now()): boolean {
+  return admittedOverrunUsd(userId, runId, now) !== null;
+}
+
+/**
+ * The overrun an admitted run may spend past the budget — and, on a hit, refresh its idle
+ * window (see {@link isRunAdmitted}).
+ *
+ * @param userId - The authenticated user.
+ * @param runId - Run id from the X-Dassi-Run-Id header.
+ * @param now - Injectable clock for tests.
+ * @returns The run's overrun allowance in USD, or null when the run is not admitted.
+ */
+export function admittedOverrunUsd(userId: string, runId: string, now: number = Date.now()): number | null {
   const runs = admitted.get(userId);
-  if (!runs) return false;
-  const expiresAt = runs.get(runId);
-  if (expiresAt === undefined) return false;
-  if (now >= expiresAt) {
+  if (!runs) return null;
+  const admission = runs.get(runId);
+  if (admission === undefined) return null;
+  if (now >= admission.expiresAt) {
     // Reason: prune on the read path too. pruneUser only runs on that user's next admitRun,
     // so a user admitted once who then goes idle would otherwise keep their bucket and its
     // expired entries until process exit.
     runs.delete(runId);
     if (runs.size === 0) admitted.delete(userId);
-    return false;
+    return null;
   }
-  runs.set(runId, now + ADMISSION_TTL_MS); // slide the idle window on activity
-  return true;
+  admission.expiresAt = now + ADMISSION_TTL_MS; // slide the idle window on activity
+  return admission.overrunUsd;
 }
 
 /**
@@ -135,9 +154,9 @@ export function revokeUser(userId: string): void {
 export function touchRun(userId: string, runId: string, now: number = Date.now()): boolean {
   const runs = admitted.get(userId);
   if (!runs) return false;
-  const expiresAt = runs.get(runId);
-  if (expiresAt === undefined || now >= expiresAt) return false;
-  runs.set(runId, now + ADMISSION_TTL_MS);
+  const admission = runs.get(runId);
+  if (admission === undefined || now >= admission.expiresAt) return false;
+  admission.expiresAt = now + ADMISSION_TTL_MS;
   return true;
 }
 
@@ -168,8 +187,15 @@ export function endRun(userId: string, runId: string): void {
  * @param userId - The authenticated user.
  * @param runId - Run id from the X-Dassi-Run-Id header.
  * @param now - Injectable clock for tests.
+ * @param overrunUsd - USD the run may spend past the budget before it is re-gated;
+ *   Infinity (default) never re-checks it.
  */
-export function admitRun(userId: string, runId: string, now: number = Date.now()): void {
+export function admitRun(
+  userId: string,
+  runId: string,
+  now: number = Date.now(),
+  overrunUsd: number = Infinity,
+): void {
   let runs = admitted.get(userId);
   if (!runs) {
     runs = new Map();
@@ -179,7 +205,7 @@ export function admitRun(userId: string, runId: string, now: number = Date.now()
   // Reason: refreshing a run we already track must not be capped out — only genuinely new
   // runs beyond the cap are refused.
   if (runs.size >= MAX_ADMITTED_RUNS_PER_USER && !runs.has(runId)) return;
-  runs.set(runId, now + ADMISSION_TTL_MS);
+  runs.set(runId, { expiresAt: now + ADMISSION_TTL_MS, overrunUsd });
   // Reason: not redundant with the set above. pruneUser deletes the bucket from `admitted`
   // whenever it empties — a new user's first call, or any call after all prior runs idled
   // out. Mutating `runs` in place is then not enough because `admitted` no longer references
