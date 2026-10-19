@@ -75,7 +75,9 @@ describe('DeepSeek managed requests', () => {
     }));
   });
 
-  it.each(['gzip, deflate, br, zstd', 'gzip'])('negotiates readable usage for browser encoding %s without changing payload bytes', async (encoding) => {
+  it.each(['gzip, deflate, br, zstd', 'gzip', null])(
+    'requests readable SSE for encoding %s without changing payload bytes',
+    async (encoding) => {
     const requestBody = '{ "model": "deepseek-flash", "stream": true, "stream_options": {"include_usage":true} }';
     const responseBody = `data: ${JSON.stringify({ model: 'deepseek-flash', usage })}\n\ndata: [DONE]\n\n`;
     upstream.mockImplementationOnce(async (_input, init) => {
@@ -85,7 +87,7 @@ describe('DeepSeek managed requests', () => {
     });
     const response = await app.request('/v1/deepseek/chat/completions', {
       method: 'POST', body: requestBody,
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Accept-Encoding': encoding },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(encoding ? { 'Accept-Encoding': encoding } : {}) },
     });
     expect(response.status).toBe(200);
     expect(await response.text()).toBe(responseBody);
