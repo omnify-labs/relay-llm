@@ -75,6 +75,26 @@ describe('DeepSeek managed requests', () => {
     }));
   });
 
+  it.each(['gzip, deflate, br, zstd', 'gzip', null])(
+    'requests readable SSE for encoding %s without changing payload bytes',
+    async (encoding) => {
+    const requestBody = '{ "model": "deepseek-flash", "stream": true, "stream_options": {"include_usage":true} }';
+    const responseBody = `data: ${JSON.stringify({ model: 'deepseek-flash', usage })}\n\ndata: [DONE]\n\n`;
+    upstream.mockImplementationOnce(async (_input, init) => {
+      expect(new Headers(init?.headers).get('Accept-Encoding')).toBe('identity');
+      expect(await new Response(init?.body).text()).toBe(requestBody);
+      return new Response(responseBody, { headers: { 'Content-Type': 'text/event-stream' } });
+    });
+    const response = await app.request('/v1/deepseek/chat/completions', {
+      method: 'POST', body: requestBody,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(encoding ? { 'Accept-Encoding': encoding } : {}) },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(responseBody);
+    await vi.waitFor(() => expect(recordUsage).toHaveBeenCalledOnce());
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({ costMicroUsd: 574 }));
+  });
+
   it('rejects missing authentication before accessing the upstream', async () => {
     const response = await app.request('/v1/deepseek/chat/completions', { method: 'POST' });
     expect(response.status).toBe(401);

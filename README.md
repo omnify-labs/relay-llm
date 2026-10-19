@@ -396,6 +396,10 @@ AGPL-3.0 — see [LICENSE](LICENSE).
 
 Join the [Discord](https://discord.gg/h82Y8rk4) for questions, discussion, and support.
 
+### Upstream content encoding
+
+Relay requests `Accept-Encoding: identity` from providers. Browser clients can advertise zstd, while the deployed Node 22 fetch transport cannot decode it; forwarding that negotiation let browser tasks succeed while the server-side usage parser saw compressed bytes and recorded no charge. Provider request/response payloads remain unchanged, and usage is still extracted only from the tee copy.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

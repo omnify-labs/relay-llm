@@ -61,6 +61,11 @@ function buildUpstreamHeaders(
     headers.set(key, value);
   }
 
+  // Reason: browsers advertise zstd, which Node 22 fetch cannot decode. Usage
+  // extraction must receive SSE text even when the client can decode compressed bytes.
+  // Identity also avoids forwarding a Content-Encoding header for fetch-decoded bytes.
+  headers.set('Accept-Encoding', 'identity');
+
   // Set the provider's API key
   const apiKey = process.env[config.apiKeyEnvVar]!;
   if (config.authMethod === 'bearer') {
