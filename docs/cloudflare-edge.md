@@ -98,8 +98,9 @@ The harness checks CORS, waits for the actual Queue consumer, compares provider 
 metadata with the ledger, and checks one charge per completion and matching account spend.
 
 Private setup files (ignored): `.cache/live-env.json` containing `token`, `userId`,
-`dbHost`, `dbPort`, `dbPassword`; `.cache/staging-ca.pem`; and a known red-square PNG
-at `.cache/red-square.png`. Use database `relay_edge_staging`, role `edge_staging`.
+`dbHost`, `dbPort`, `dbPassword`; and `.cache/staging-ca.pem`. The red-square image
+fixture is included in `scripts/fixtures/`. Use database `relay_edge_staging`, role
+`edge_staging`.
 Results go to `.cache/live-results.json`. Refresh expired tokens before rerunning.
 These tests incur provider charges.
 

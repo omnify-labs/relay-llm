@@ -221,7 +221,9 @@ async function toolRoundTrip(model: Model): Promise<void> {
 }
 
 async function imageRequest(model: Model): Promise<void> {
-  const image = (await readFile('.cache/red-square.png')).toString('base64');
+  const image = (await readFile(new URL('./fixtures/red-square.png', import.meta.url))).toString(
+    'base64',
+  );
   const body = bodyFor(model, '这张图片主要是什么颜色？只回答颜色。');
   if (model.provider === 'google')
     body.contents[0].parts.push({ inlineData: { mimeType: 'image/png', data: image } });
