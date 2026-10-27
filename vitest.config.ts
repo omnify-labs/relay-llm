@@ -5,5 +5,6 @@ export default defineConfig({
     // Reason: the vendored LiteLLM submodule under vendor/ ships its own test
     // suite; scope collection to relay's own tests so `pnpm test` stays ours.
     include: ['src/**/*.test.ts'],
+    exclude: ['src/worker/**/*.test.ts'],
   },
 });

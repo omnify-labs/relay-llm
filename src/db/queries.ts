@@ -3,6 +3,7 @@
  */
 
 import { getDb } from './client.js';
+import type postgres from 'postgres';
 
 export interface UserBudget {
   spend: number;
@@ -95,8 +96,10 @@ export type RecordUsageOutcome = 'charged' | 'replay' | 'uncharged';
  *   the request_id was already recorded (and therefore already charged); 'uncharged'
  *   when the row was inserted but no user_budgets row exists to charge.
  */
-export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOutcome> {
-  const sql = getDb();
+export async function recordUsage(
+  record: UsageLogInsert,
+  sql: postgres.Sql | postgres.TransactionSql = getDb(),
+): Promise<RecordUsageOutcome> {
   // Reason: trunc(…, 6) keeps the "never round up" guarantee explicit; the /1000000
   // division is exact in NUMERIC (see the 2026-08-25 spend precision migration).
   const rows = await sql`

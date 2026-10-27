@@ -27,7 +27,7 @@
  */
 
 /** Idle-window backstop in ms (default 30 min), refreshed on each admitted call. */
-const DEFAULT_ADMISSION_TTL_MS = 1_800_000;
+import { DEFAULT_ADMISSION_TTL_MS, MAX_ADMITTED_RUNS_PER_USER } from './policy.js';
 const parsedTtl = parseInt(process.env.RUN_ADMISSION_TTL_MS || '', 10);
 // Reason: a malformed env value must not silently disable admission. NaN would make every
 // `now < expiresAt` false, so no run would stay admitted and every call would fall back to
@@ -43,7 +43,7 @@ const ADMISSION_TTL_MS =
  * entries. The cap bounds memory to (users × this). Comfortably above real usage — a
  * user's concurrent runs are their open tab groups plus any schedule firing in the window.
  */
-export const MAX_ADMITTED_RUNS_PER_USER = 8;
+export { MAX_ADMITTED_RUNS_PER_USER } from './policy.js';
 
 /**
  * Admitted runs: user -> (run -> idle-window expiry in ms).

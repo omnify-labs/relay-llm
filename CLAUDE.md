@@ -2,6 +2,12 @@
 
 This repository hosts **Relay LLM** — a thin, transparent LLM proxy that forwards requests directly to providers (OpenAI, Anthropic, Google) with zero format translation. Built with TypeScript, Hono, and deployed on Cloud Run.
 
+The Cloudflare Worker MVP in `src/worker/` serves managed Gemini and DeepSeek routes.
+It shares native passthrough/usage parsing with Node, persists run admission in Postgres
+through uncached Hyperdrive, and settles usage through Cloudflare Queues. See
+`docs/cloudflare-edge.md` for deployment and testing. The Worker entrypoint has a default
+export because Cloudflare requires it; reusable modules keep named exports.
+
 ## Project Awareness & Context
 - **Always check the project structure** at the start of a new conversation to understand the architecture, patterns, and conventions in use.
 - **Never assume missing context**. Ask questions if requirements are unclear or contradict existing code.
@@ -112,6 +118,10 @@ docs/
   pnpm typecheck          # tsconfig strict mode verification
   pnpm lint               # eslint verification
   pnpm test               # unit tests (Vitest)
+  pnpm test:worker        # actual workerd runtime, mocked external I/O
+  pnpm test:database      # disposable local PostgreSQL integration tests
+  pnpm build:worker      # dry-run Worker bundle
+  pnpm test:live          # explicit staging URL/credentials, real provider calls
   ```
 - Keep `tsconfig.json` strict. Enable `noImplicitAny`, `strictNullChecks`, `moduleResolution: "bundler"`.
 - Use `.env` for local development. Never commit secrets. Document required keys in `.env.example`.

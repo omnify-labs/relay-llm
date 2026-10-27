@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dassi-relay-edge-mvp",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
+  "workers_dev": true,
+  "vars": { "ALLOWED_USER_IDS": "" },
+  "queues": {
+    "producers": [{ "binding": "USAGE_QUEUE", "queue": "dassi-relay-edge-usage" }],
+    "consumers": [
+      {
+        "queue": "dassi-relay-edge-usage",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "dassi-relay-edge-usage-dlq",
+      },
+    ],
+  },
+  "observability": { "enabled": true },
+}

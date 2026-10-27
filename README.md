@@ -1,5 +1,10 @@
 # RelayLLM
 
+The Cloudflare edge MVP forwards managed Gemini and DeepSeek calls directly from a
+global Worker to each provider, preserving native request/response bytes.
+See [edge deployment and validation](docs/cloudflare-edge.md) for setup, nonlive
+tests, and real-provider smoke tests. The existing Node deployment remains available.
+
 LLM proxies like LiteLLM and Portkey translate your requests between provider formats. This works fine for simple chat completions. **It breaks tool calling.**
 
 ## The problem
