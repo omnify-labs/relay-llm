@@ -3,10 +3,14 @@
 This repository hosts **Relay LLM** — a thin, transparent LLM proxy that forwards requests directly to providers (OpenAI, Anthropic, Google) with zero format translation. Built with TypeScript, Hono, and deployed on Cloud Run.
 
 The Cloudflare Worker MVP in `src/worker/` serves managed Gemini and DeepSeek routes.
-It shares native passthrough/usage parsing with Node, persists run admission in Postgres
-through uncached Hyperdrive, and settles usage through Cloudflare Queues. See
+It shares native passthrough/usage parsing with Node. The staging prototype keeps run
+admission and local debits in one SQLite Durable Object per payer, refreshes account
+snapshots through uncached Hyperdrive, and settles usage through Cloudflare Queues. See
 `docs/cloudflare-edge.md` for deployment and testing. The Worker entrypoint has a default
 export because Cloudflare requires it; reusable modules keep named exports.
+
+The edge prototype tests a bounded 30-second external-policy update window; this is
+not approval to change the production immediate-revocation policy described below.
 
 ## Project Awareness & Context
 - **Always check the project structure** at the start of a new conversation to understand the architecture, patterns, and conventions in use.

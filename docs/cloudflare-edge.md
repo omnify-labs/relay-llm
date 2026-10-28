@@ -1,14 +1,39 @@
 # Cloudflare edge MVP
 
 Browser → Cloudflare Worker → Gemini / DeepSeek. The Worker validates the existing
-Supabase JWT locally, makes one admission query through Hyperdrive, then forwards the
-native provider request. Responses stream unchanged. An independent tee extracts usage
-incrementally and sends metadata to Cloudflare Queues. The consumer atomically inserts
-usage, charges credit, and marks the request settled.
+Supabase JWT locally, checks a durable account counter, then forwards the native provider
+request. Responses stream unchanged. An independent tee extracts usage, debits the
+account counter and persists an outbox event. Cloudflare Queues carries that metadata to
+a consumer that atomically inserts usage, charges central credit, and marks it settled.
 
 One global deployment serves all users. Cloudflare selects ingress; this does not
 guarantee an East Asia location or mainland China latency. Validate from the affected
-network before making a performance claim.
+network before making a performance claim. The current prototype is staging-only.
+
+## Removing the synchronous origin read
+
+Each payer (personal account or shared workspace pool) has one SQLite Durable Object.
+It serializes run admissions and pending usage, so multiple Workers do not independently
+spend a cached balance. A snapshot includes the central balance, active members' caps,
+paid eligibility, and IDs of already settled local events. Refresh and local reconciliation
+are atomic. New outbox sends wait for an in-flight snapshot to finish, preventing a newly
+settled charge from appearing in both the snapshot balance and pending debits.
+
+The Worker caches user-to-payer routing for at most 30 seconds. Active account objects
+refresh snapshots every 10 seconds; snapshots older than 30 seconds require a successful
+origin refresh before admission. Cold users and idle accounts therefore still wait for
+origin reads. The steady-state path is JWT → cached payer → durable admission → provider.
+Provider streams bypass the account object.
+
+This is an explicit staging experiment with **up to 30 seconds of delay** for external
+subscription, membership, budget or legacy-relay spend changes. Edge observations debit
+the local counter immediately. It does not preserve the production policy of immediate
+admin revocation. Production adoption of that window remains a product decision.
+
+On first access, East Asian users supply the `apac-ne` location hint, and Southeast/South
+Asian users supply `apac-se`. A payer still has one object location, not a copy in every
+edge. Hints are best effort; shared global teams or traveling users can be far from their
+account object. See [Cloudflare placement semantics](https://developers.cloudflare.com/durable-objects/reference/data-location/).
 
 ## Behavior
 
@@ -19,28 +44,30 @@ network before making a performance claim.
   images, query parameters, run IDs, keepalive and end signals work unchanged.
 - Fixed provider hosts only. Browser credentials/cookies are stripped; server keys
   are injected. Redirects are rejected. Requests are never automatically replayed.
-- Postgres holds shared admission state. Paid runs may finish beyond credit; trial
-  runs retain the existing $2 bounded overrun; untagged calls remain strict. Database
-  errors deny access. Admin budget resets revoke admissions across Workers.
-- Hyperdrive caching **must be disabled**. Admission reads and modifies billing state.
+- Durable Objects hold shared admission state. Paid runs may finish beyond credit;
+  trial runs retain the existing $2 bounded overrun; untagged calls remain strict.
+  Failed mandatory refreshes deny access. Budget revisions revoke runs when refreshed.
+- Hyperdrive caching **must be disabled** so snapshot age has a defined bound.
   Each invocation owns its postgres.js client; Hyperdrive pools origin connections.
 - Queue delivery is at least once. Request IDs plus transactions prevent duplicate
   charges. Failed settlements retry, then enter the dead-letter queue.
 - Cancellation aborts the provider. Missing final usage is recorded as interrupted or
   unavailable, without fabricating a zero-token charge. Queues protect events after
-  successful enqueue; abrupt termination before enqueue can leave a `started` row.
+  successful enqueue; the account outbox retries failed sends with durable alarms.
+  Abrupt termination before observation can leave an unresolved local request row.
   This MVP does not reconstruct missing provider usage. Inspect unresolved rows and
   the dead-letter queue. Never automatically replay an LLM call after streamed output.
 
 ## Deployment
 
 Use a staging database and test account first. Production requires the existing billing
-schema/functions plus [`20261027_edge_admission.sql`](migrations/20261027_edge_admission.sql).
+schema/functions plus [`20261027_edge_admission.sql`](migrations/20261027_edge_admission.sql)
+and [`20261028_edge_snapshots.sql`](migrations/20261028_edge_snapshots.sql), in that order.
 Apply as the billing-table owner. This adds private tables/functions and revocation
 triggers, without replacing the billing tables. The Worker role needs private-schema
 usage, private-table SELECT/INSERT/UPDATE/DELETE, private-function execution, and the
 same public billing permissions as Node. Budget writers need permission to run the
-revocation trigger and delete private admissions.
+revocation trigger, delete private admissions, and update private budget versions.
 
 1. Create both queues named in `wrangler.jsonc`.
 2. Create Hyperdrive for a TLS-enabled Postgres endpoint with `--caching-disabled`.
@@ -53,11 +80,12 @@ revocation trigger and delete private admissions.
 4. Upload `JWT_SECRET`, `GOOGLE_API_KEY`, and `DEEPSEEK_API_KEY` using
    `wrangler secret bulk <private-json-file> --config wrangler.staging.json`.
    The JWT secret must match the issuing Supabase instance. Keep secret files private.
-5. `pnpm deploy:worker`. Health confirms runtime reachability; authenticated model
+5. Keep the `ACCOUNTS` Durable Object binding and `account-gate-v1` SQLite migration.
+   `pnpm deploy:worker`. Health confirms runtime reachability; authenticated model
    smoke tests confirm actual bindings, admission and provider access.
 
 Staging uses [`edge-billing.sql`](../scripts/fixtures/edge-billing.sql), then the real
-edge migration, with a synthetic paid credit account. Fixture schema is **not** a
+edge migrations, with a synthetic paid credit account. Fixture schema is **not** a
 production migration. Production cutover requires the real billing database and its
 migration; never route general traffic to a fixture DB. Only migrate clients using
 the supported managed providers. Retain the Node admin/billing endpoints and other
@@ -87,6 +115,12 @@ Worker tests execute in workerd with mocked external I/O. They cover auth, credi
 denial, DB failure, byte preservation, progressive SSE/Unicode, tools, images, errors,
 redirects, cancellation and queue retries. SQL tests exercise actual locks, concurrent
 admissions, paid/trial limits, lifecycle, revocation and concurrent duplicate settlement.
+Account tests use actual Durable Object SQLite storage/RPC/alarms with mocked external
+I/O: warm requests without SQL, simultaneous members, local debits, snapshot expiry,
+reconciliation, retained outbox events, revocation and object reconstruction. Routing
+tests exercise the actual Cache API with mocked payer lookup. Expected exceptions are
+asserted inside the object because this pinned test pool cannot clean up SQLite after
+an RPC rejection; the Worker HTTP 503 behavior is tested separately.
 CI runs both suites.
 
 ## Live tests
@@ -209,3 +243,48 @@ allowance documented above; no pilot measurements enter this table.
 Timing parser tests, typecheck and lint passed. The temporary VM, disk and project SSH
 key were removed after collecting results. Raw measurements remain in ignored local
 storage; the reusable runner and measurement tests are in `scripts/benchmark-relay*`.
+
+## Durable account prototype result — 2026-10-28 UTC
+
+Worker version `e777c325-3e93-4283-9501-43eb040f7648` uses the account architecture
+described above. All 224 shared unit tests, 37 workerd tests, 16 PostgreSQL integration
+tests and five benchmark tests passed, along with typecheck, lint and builds.
+
+The first live warmup exposed a PostgreSQL array-encoding error with `fetch_types:false`.
+That run stopped before measured pairs. Snapshot parameters now use the driver's native
+JSON binding; SQL tests use the same driver setting as Hyperdrive. The corrected run
+restarted all pairs and completed without failures.
+
+The same Tokyo runner and benchmark settings ran 07:19:49–07:24:03 UTC: 120 measured
+requests and six excluded warmups, all successful. Both paths reported `NRT`. Body
+hashes and balanced endpoint order were verified again. DeepSeek cache hits were
+balanced at five requests per endpoint.
+
+| Model | Current first answer | Edge first answer | Current completion | Edge completion |
+| --- | ---: | ---: | ---: | ---: |
+| Gemini 3.8 Flash | 2,486 ms | 2,480 ms | 2,569 ms | 2,671 ms |
+| Gemini 3.5 Flash-Lite | 706 ms | 795 ms | 820 ms | 1,064 ms |
+| DeepSeek Flash | 817 ms | 726 ms | 1,063 ms | 1,004 ms |
+
+These are sample medians. Within-pair first-answer savings were **-475 ms, -91 ms,
+and +66 ms** respectively, with the edge winning 7/20, 5/20 and 12/20 pairs. Gemini
+Flash's similar overall medians conceal variable, often slower paired results. This
+supports a modest DeepSeek improvement in this sample, not a consistent Gemini gain
+or a global speed guarantee. Different deployed provider credentials remain an
+unverified comparison factor.
+
+Sixteen measured request IDs matched captured admission logs: median **37 ms**, range
+31–129 ms, versus the prior origin-query sample's 245 ms median. The separately captured
+cold warmup required 856 ms for admission. The warm billing wait is substantially
+reduced; first-use and expired-state refreshes still cross to the origin. Removing
+the billing wait alone does not make every provider path faster.
+
+The corrected deployed gateway also passed all 18 live functional scenarios across
+the three models. All 18 observations settled: 15 unique completed charges and three
+interruptions. Token metadata and account spend reconciled with the ledger. This live
+suite ran after the regional benchmark to avoid overlapping provider traffic.
+
+The temporary Tokyo VM, disk and project SSH key were removed. Production routing and
+billing remain unchanged. The prototype is ready for review; a blanket Gemini cutover
+is not supported by these latency results. The 30-second external-policy update window
+also remains staging-only pending the product decision described above.

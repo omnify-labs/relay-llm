@@ -2,6 +2,8 @@
 
 The Cloudflare edge MVP forwards managed Gemini and DeepSeek calls directly from a
 global Worker to each provider, preserving native request/response bytes.
+The staging prototype uses a durable account counter to remove the central billing
+read from warm requests, with background ledger settlement and bounded snapshot refresh.
 See [edge deployment and validation](docs/cloudflare-edge.md) for setup, nonlive
 tests, real-provider smoke tests, and the paired regional speed benchmark
 (`pnpm benchmark:relay`). The existing Node deployment remains available.

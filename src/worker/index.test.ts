@@ -6,16 +6,27 @@ import worker, { createWorkerApp, consumeUsage, type WorkerEnv } from './index.j
 import type { UsageObservation } from '../proxy/handler.js';
 import * as database from './database.js';
 import type { MessageBatch } from '@cloudflare/workers-types';
+import type { AccountHandle } from './routing.js';
 
 const userId = '00000000-0000-4000-8000-000000000001';
 const secret = 'edge-test-signing-key';
 const encoder = new TextEncoder();
 const usages: UsageObservation[] = [];
 const end = vi.fn(async () => {});
+const accountStub = {
+  authorize: vi.fn(async () => 'allowed'),
+  lifecycle: vi.fn(async () => true),
+  observe: vi.fn(async (event: UsageObservation) => {
+    usages.push(event);
+  }),
+};
 const services = {
   connect: vi.fn(() => ({ end }) as unknown as ReturnType<typeof database.connect>),
-  authorize: vi.fn(async () => 'allowed'),
-  runLifecycle: vi.fn(async () => true),
+  authorize: accountStub.authorize,
+  runLifecycle: accountStub.lifecycle,
+  openAccount: vi.fn(
+    async () => ({ accountId: userId, stub: accountStub }) as unknown as AccountHandle,
+  ),
   settle: vi.fn(async () => {}),
 };
 const bindings = {
@@ -24,6 +35,7 @@ const bindings = {
   DEEPSEEK_API_KEY: 'deepseek-secret',
   ALLOWED_USER_IDS: userId,
   HYPERDRIVE: {},
+  ACCOUNTS: {},
   USAGE_QUEUE: {
     send: vi.fn(async (event: UsageObservation) => {
       usages.push(event);
@@ -89,9 +101,14 @@ describe('actual Worker routes', () => {
         path: '/chat/completions',
         method: 'POST',
         body,
-        headers: { authorization: 'Bearer deepseek-secret', 'accept-encoding': 'identity' },
+        headers: {
+          authorization: 'Bearer deepseek-secret',
+          'accept-encoding': 'identity',
+        },
       })
-      .reply(200, deepseekSse, { headers: { 'content-type': 'text/event-stream' } });
+      .reply(200, deepseekSse, {
+        headers: { 'content-type': 'text/event-stream' },
+      });
     const result = await request();
     expect(result.response.status).toBe(200);
     expect(result.text).toBe(deepseekSse);
@@ -179,19 +196,16 @@ describe('actual Worker routes', () => {
     fetchMock
       .get('https://api.deepseek.com')
       .intercept({ path: '/chat/completions', method: 'POST' })
-      .reply(200, 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+      .reply(200, 'data: [DONE]\n\n', {
+        headers: { 'content-type': 'text/event-stream' },
+      });
     await request();
     expect(usages[0]).toMatchObject({ outcome: 'unavailable', usage: null });
   });
   it('forwards lifecycle calls for the authenticated user', async () => {
     const result = await request('/v1/runs/run-1/keepalive');
     expect(JSON.parse(result.text)).toEqual({ alive: true });
-    expect(services.runLifecycle).toHaveBeenCalledWith(
-      expect.anything(),
-      userId,
-      'run-1',
-      'keepalive',
-    );
+    expect(services.runLifecycle).toHaveBeenCalledWith(userId, 'run-1', 'keepalive');
   });
   it('rejects unsupported provider routes', async () => {
     expect((await request('/v1/google/v1beta/models/gemini:delete')).response.status).toBe(404);
@@ -218,7 +232,11 @@ it('acknowledges settled messages and retries only failed settlements', async ()
 it('the deployed queue entrypoint ignores the runtime ExecutionContext as service overrides', async () => {
   vi.spyOn(database, 'connect').mockImplementation(services.connect);
   vi.spyOn(database, 'settle').mockResolvedValue(undefined);
-  const message = { body: {} as UsageObservation, ack: vi.fn(), retry: vi.fn() };
+  const message = {
+    body: {} as UsageObservation,
+    ack: vi.fn(),
+    retry: vi.fn(),
+  };
   await Reflect.apply(worker.queue, undefined, [
     { messages: [message] },
     bindings,

@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import postgres from 'postgres';
-import { authorize, runLifecycle, settle } from '../src/worker/database.js';
+import { authorize, runLifecycle, settle, resolvePayer, snapshot } from '../src/worker/database.js';
 import type { UsageObservation } from '../src/proxy/handler.js';
 
 const url = new URL(
@@ -14,12 +14,12 @@ const admin = postgres(url.toString(), { max: 1 });
 const name = `edge_test_${Date.now()}`;
 await admin.unsafe(`CREATE DATABASE ${name}`);
 url.pathname = '/' + name;
-const sql = postgres(url.toString(), { max: 10 });
+const sql = postgres(url.toString(), { max: 10, fetch_types: false });
 const actor = '00000000-0000-4000-8000-000000000001';
 const member = '00000000-0000-4000-8000-000000000002';
 let passed = 0;
 async function check(name: string, run: () => Promise<void>) {
-  await sql`TRUNCATE relay_internal.requests, relay_internal.run_admissions, usage_logs, user_budgets, test_accounts CASCADE`;
+  await sql`TRUNCATE relay_internal.requests, relay_internal.run_admissions, relay_internal.budget_versions, usage_logs, user_budgets, test_accounts CASCADE`;
   await sql`INSERT INTO test_accounts VALUES (${actor}::uuid, true, ${actor}, false), (${member}::uuid, true, ${actor}, false)`;
   await sql`INSERT INTO user_budgets(user_id,budget,spend,plan_base) VALUES (${actor},10,0,50)`;
   await run();
@@ -35,6 +35,12 @@ try {
     await migrationConnection.unsafe(
       await readFile(
         new URL('../docs/migrations/20261027_edge_admission.sql', import.meta.url),
+        'utf8',
+      ),
+    );
+    await migrationConnection.unsafe(
+      await readFile(
+        new URL('../docs/migrations/20261028_edge_snapshots.sql', import.meta.url),
         'utf8',
       ),
     );
@@ -170,6 +176,60 @@ try {
         (await sql`SELECT outcome FROM relay_internal.requests`)[0].outcome,
         'interrupted',
       );
+    },
+  );
+  await check(
+    'snapshot resolves shared payer, entitlements and integer account values',
+    async () => {
+      assert.equal(await resolvePayer(sql, member), actor);
+      const value = await snapshot(sql, actor, [actor, member], []);
+      assert.equal(value.budget, 10_000_000);
+      assert.equal(value.spend, 0);
+      assert.equal(value.planBase, 50_000_000);
+      assert.equal(value.actors[member].payer, actor);
+      assert.equal(value.actors[member].paid, true);
+      assert.deepEqual(value.settled, []);
+      await sql`UPDATE test_accounts SET paid=false,blocked=true WHERE id=${member}::uuid`;
+      const changed = await snapshot(sql, actor, [member], []);
+      assert.equal(changed.actors[member].paid, false);
+      assert.equal(changed.actors[member].memberLimit, 0);
+    },
+  );
+  await check(
+    'snapshot revisions distinguish credit purchases from revoking budget writes',
+    async () => {
+      const read = () => snapshot(sql, actor, [actor], []);
+      const initial = (await read()).revision;
+      await sql`UPDATE user_budgets SET budget=budget+1 WHERE user_id=${actor}`;
+      assert.equal((await read()).revision, initial);
+      await sql`UPDATE user_budgets SET plan_base=plan_base WHERE user_id=${actor}`;
+      assert.notEqual((await read()).revision, initial);
+      const rev = (await read()).revision;
+      await sql`DELETE FROM user_budgets WHERE user_id=${actor}`;
+      const missing = await read();
+      assert.equal(missing.budget, null);
+      assert.notEqual(missing.revision, rev);
+    },
+  );
+  await check('missing numeric billing values fail closed during snapshot load', async () => {
+    await sql`UPDATE user_budgets SET spend=null WHERE user_id=${actor}`;
+    await assert.rejects(snapshot(sql, actor, [actor], []), /Incomplete account amount/);
+  });
+  await check(
+    'queue settlement creates the deferred ledger row and snapshots include interruptions',
+    async () => {
+      const id = crypto.randomUUID();
+      await settle(sql, {
+        requestId: id,
+        userId: actor,
+        provider: 'google',
+        statusCode: 200,
+        latencyMs: 5,
+        outcome: 'interrupted',
+        usage: null,
+      });
+      assert.deepEqual((await snapshot(sql, actor, [actor], [id])).settled, [id]);
+      assert.equal(Number((await sql`SELECT count(*) FROM usage_logs`)[0].count), 0);
     },
   );
   console.log(`${passed} database tests passed`);
