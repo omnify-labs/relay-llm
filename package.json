@@ -17,6 +17,8 @@
     "build:worker": "wrangler deploy --dry-run --outdir dist/worker",
     "test:database": "tsx scripts/test-edge-database.ts",
     "test:live": "tsx scripts/test-edge-live.ts",
+    "test:benchmark": "node --test scripts/benchmark-relay.test.mjs",
+    "benchmark:relay": "node scripts/benchmark-relay.mjs",
     "dev:worker": "wrangler dev",
     "deploy:worker": "wrangler deploy --config wrangler.staging.json"
   },

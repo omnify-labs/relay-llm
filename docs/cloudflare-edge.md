@@ -114,6 +114,34 @@ This is an API smoke harness, not an extension UI test or a mainland latency ben
 Run an actual extension conversation on the affected network before claiming the
 reported slowdown is fixed. No comparative control deployment is needed.
 
+## Regional speed comparison
+
+`pnpm benchmark:relay` runs the existing production relay and this staging Worker from
+the same machine. `BENCH_CONFIG` points to a private JSON file containing a valid test
+account `token`, a `location` label and `pairs: 20`. The default is
+`.cache/latency-env.json`; `BENCH_OUTPUT` defaults to `.cache/latency-results.json`.
+Only the short-lived user session is required, not provider keys or database access.
+
+Each managed model gets one separately reported warmup per endpoint, then 20 matched
+pairs: ten short Chinese replies and ten synthetic longer-context summaries. Each pair
+sends identical bytes with the same output limit and temperature. Endpoint order is
+randomized and balanced per scenario. Requests are sequential; every result records
+its request ID, body hash, endpoint order, model version, token/cache metadata and
+Cloudflare ingress code when supplied. DeepSeek thinking is disabled; Gemini Flash
+uses `low` and Flash-Lite uses `minimal`, with a 4,096-token output allowance. This
+measures these settings, not all agent workloads.
+
+First answer timing ignores headers, empty deltas, reasoning and usage-only events.
+Total duration, streaming gaps and failures are retained. Failed or incomplete pairs
+are excluded from matched speed calculations and explicitly counted as failures.
+Warmups are excluded from the measured sample. `pnpm test:benchmark` checks these
+measurement boundaries without live requests. The benchmark incurs real model charges.
+
+The comparison includes the staging billing database and production billing database,
+so it measures the deployed paths and cannot attribute all differences to Cloudflare.
+A regional cloud VM establishes performance from that data-center network. It does not
+measure browser rendering, residential/mobile networks or mainland China routing.
+
 ## Incomplete usage
 
 ```sql
@@ -145,3 +173,39 @@ Staging: `https://dassi-relay-edge-mvp.kklt92.workers.dev` (test-account access 
 Worker version: `539522d7-4977-4307-804d-8f0057285541`.
 Production routing/billing were not switched. This run did not test the extension UI
 or a mainland China network and establishes no before/after latency improvement.
+
+## Tokyo latency result — 2026-10-28 UTC
+
+The regional comparison ran from a temporary Google Cloud VM in `asia-northeast1-b`
+(Tokyo), 06:01–06:06 UTC, using Node 18.20.4. It completed 20 matched pairs per model:
+120 measured requests plus six separately excluded warmups. All completed successfully.
+Body hashes confirmed identical requests within each pair; each scenario had five
+current-first and five edge-first pairs. Both paths reported Cloudflare ingress `NRT`.
+
+| Model                 | Current first answer | Edge first answer | Current completion | Edge completion |
+| --------------------- | -------------------: | ----------------: | -----------------: | --------------: |
+| Gemini 3.8 Flash      |             1,959 ms |          2,210 ms |           2,016 ms |        2,642 ms |
+| Gemini 3.5 Flash-Lite |               656 ms |            881 ms |             818 ms |        1,200 ms |
+| DeepSeek Flash        |               794 ms |            860 ms |           1,003 ms |        1,083 ms |
+
+These are sample medians across both scenarios. Median within-pair first-answer
+penalties for the edge were 328, 215 and 86 ms respectively; it won 7/20, 1/20 and
+7/20 pairs. This run demonstrates **no consistent speed improvement from Tokyo**.
+Gemini Flash's longer-context timings were variable; a small sample is not a reliable
+tail-latency estimate. Do not infer a universal regression or an East Asia-wide result.
+
+Existing Worker logs matched 51 measured requests. Admission took a median 245 ms
+(237–399 ms), including the query through Hyperdrive to the staging database in
+DigitalOcean `sfo3`. This is a candidate source of overhead, not a demonstrated
+explanation of the entire difference. The current relay origin location and matching
+provider credentials were not independently verified; this compares the deployed
+end-to-end paths rather than isolating Cloudflare as the sole variable.
+
+An earlier pilot used default Gemini thinking and a 1,024-token cap, causing truncated
+longer-context replies on both paths. It was stopped and retained separately. The
+reported run restarted all pairs with the explicit thinking settings and larger
+allowance documented above; no pilot measurements enter this table.
+
+Timing parser tests, typecheck and lint passed. The temporary VM, disk and project SSH
+key were removed after collecting results. Raw measurements remain in ignored local
+storage; the reusable runner and measurement tests are in `scripts/benchmark-relay*`.

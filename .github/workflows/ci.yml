@@ -48,6 +48,9 @@ jobs:
       - name: Run tests
         run: pnpm test --run
 
+      - name: Test latency measurement
+        run: pnpm test:benchmark
+
       - name: Test Cloudflare runtime
         run: pnpm test:worker
 
