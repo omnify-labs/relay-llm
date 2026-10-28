@@ -1,5 +1,20 @@
 # RelayLLM
 
+The Cloudflare edge MVP forwards managed Gemini and DeepSeek calls directly from a
+global Worker to each provider, preserving native request/response bytes.
+The staging prototype uses a durable account counter to remove the central billing
+read from warm requests, with background ledger settlement and bounded snapshot refresh.
+See [edge deployment and validation](docs/cloudflare-edge.md) for setup, nonlive
+tests, real-provider smoke tests, and regional comparisons: `pnpm benchmark:relay`
+for a fixed sample or `pnpm benchmark:soak` for a sustained 10–20 minute session
+with connection reuse and streaming-stall measurements. The sustained runner uses
+the pinned Undici development dependency. The existing Node deployment remains available.
+The sustained results show DeepSeek latency gains alongside CPU-limit stream failures
+and Hong Kong Gemini regional rejections; this remains a staging prototype.
+The follow-up adds a 1,000 ms CPU cap (Workers Paid required) and an optional native
+Google Cloud global route for Gemini, with short-lived staging credentials. Direct
+Hong Kong Gemini compatibility checks pass; the updated sustained edge test is pending.
+
 LLM proxies like LiteLLM and Portkey translate your requests between provider formats. This works fine for simple chat completions. **It breaks tool calling.**
 
 ## The problem

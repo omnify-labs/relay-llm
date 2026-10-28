@@ -12,18 +12,14 @@ import type { MiddlewareHandler } from 'hono';
 import { getUserBudget, hasPaidSubscription } from '../db/queries.js';
 import { admittedOverrunUsd, admitRun } from './run-admission.js';
 
-/**
- * Plan base at or below this (USD) is a free/trial user — the small starter grant
- * ($2–$5); the cheapest paid tier (Starter) is $50.
- */
-const FREE_TIER_PLAN_BASE_CEILING = 10;
+import { FREE_TIER_PLAN_BASE_CEILING, TRIAL_RUN_OVERRUN_USD } from './policy.js';
 
 /**
  * USD a free/trial account may spend past its budget so the run that crosses it can
  * finish (200 credits). The ceiling is on the account's total spend, so a runaway loop or
  * concurrent runs share it and stop at budget + this amount.
  */
-export const TRIAL_RUN_OVERRUN_USD = 2;
+export { TRIAL_RUN_OVERRUN_USD } from './policy.js';
 
 /**
  * Require a current paid subscription for premium provider routes.

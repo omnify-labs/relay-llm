@@ -1,438 +1,232 @@
-/**
- * Proxy request handler.
- * Forwards requests byte-for-byte to the upstream provider.
- * Streams responses byte-for-byte back to the client.
- * Extracts token usage asynchronously without blocking the stream.
- *
- * Design principles:
- * 1. NEVER parse or modify the request body
- * 2. NEVER buffer the response — stream immediately
- * 3. Extract usage from response headers/final chunks asynchronously
- * 4. Log usage after the response completes (fire-and-forget)
- */
-
+/** Native provider passthrough shared by the Node server and edge Worker. */
 import type { Context, MiddlewareHandler } from 'hono';
 import { PROVIDERS, type ProviderName } from './providers.js';
-import { logUsage } from '../billing/usage.js';
+import { logUsage, type UsageRecord } from '../billing/usage.js';
+import { parseUsageFromBody, SseUsageReader, type ParsedUsage } from './usage.js';
+export { parseUsageFromBody, parseUsageFromSSE } from './usage.js';
 
-/**
- * Build upstream URL by stripping the route prefix and appending to the provider's base URL.
- */
-function buildUpstreamUrl(path: string, provider: ProviderName, query: string): string {
-  const config = PROVIDERS[provider];
-  const upstreamPath = path.replace(config.routePrefix, '');
-  let url = `${config.upstream}${upstreamPath}`;
-
-  // Forward any existing query params from the client
-  if (query) {
-    const separator = url.includes('?') ? '&' : '?';
-    url = `${url}${separator}${query}`;
-  }
-
-  // Reason: Google uses API key as query parameter, appended after client params
-  // so both ?alt=sse (from client) and ?key=xxx (server-side) are present.
-  if (config.authMethod === 'query-param') {
-    const apiKey = process.env[config.apiKeyEnvVar]!;
-    const separator = url.includes('?') ? '&' : '?';
-    url = `${url}${separator}key=${apiKey}`;
-  }
-
-  return url;
+export interface UsageObservation {
+  requestId: string;
+  userId: string;
+  provider: ProviderName;
+  statusCode: number;
+  latencyMs: number;
+  outcome: 'complete' | 'interrupted' | 'unavailable';
+  usage: ParsedUsage | null;
 }
 
-/**
- * Build upstream headers.
- * Replaces the client's Authorization with the provider's API key.
- * Forwards all other headers unchanged.
- */
-function buildUpstreamHeaders(
-  originalHeaders: Headers,
+export interface ProxyOptions {
+  apiKey?: string;
+  /** Native Gemini on Google Cloud; only the URL and authentication change. */
+  googleCloud?: { project: string; accessToken: string };
+  requestId?: string;
+  observe?: (event: UsageObservation) => Promise<void>;
+  waitUntil?: (promise: Promise<unknown>) => void;
+}
+
+function upstreamRequest(
+  c: Context,
   provider: ProviderName,
-): Headers {
+  apiKey: string,
+  googleCloud?: ProxyOptions['googleCloud'],
+): [URL, Headers] {
   const config = PROVIDERS[provider];
+  const incoming = new URL(c.req.url);
+  const url = googleCloud
+    ? new URL(
+        `https://aiplatform.googleapis.com/v1/projects/${googleCloud.project}` +
+          '/locations/global/publishers/google/models/' +
+          incoming.pathname.split('/').at(-1),
+      )
+    : new URL(config.upstream + incoming.pathname.slice(config.routePrefix.length));
+  url.search = incoming.search;
+  for (const key of ['key', 'access_token', 'api_key']) url.searchParams.delete(key);
   const headers = new Headers();
-
-  // Forward all headers except auth-related ones
-  for (const [key, value] of originalHeaders.entries()) {
-    const lower = key.toLowerCase();
-    if (lower === 'authorization' || lower === 'x-api-key' || lower === 'x-goog-api-key' || lower === 'host') {
-      continue;
-    }
-    headers.set(key, value);
+  // Only provider protocol headers cross the boundary. Browser cookies, Dassi JWTs,
+  // forwarding headers and run identifiers must not reach a model provider.
+  for (const name of [
+    'content-type',
+    'accept',
+    'anthropic-version',
+    'anthropic-beta',
+    'openai-beta',
+  ]) {
+    const value = c.req.header(name);
+    if (value) headers.set(name, value);
   }
-
-  // Reason: browsers advertise zstd, which Node 22 fetch cannot decode. Usage
-  // extraction must receive SSE text even when the client can decode compressed bytes.
-  // Identity also avoids forwarding a Content-Encoding header for fetch-decoded bytes.
   headers.set('Accept-Encoding', 'identity');
-
-  // Set the provider's API key
-  const apiKey = process.env[config.apiKeyEnvVar]!;
-  if (config.authMethod === 'bearer') {
-    headers.set('Authorization', `Bearer ${apiKey}`);
-  } else if (config.authMethod === 'x-api-key') {
+  if (googleCloud) headers.set('Authorization', `Bearer ${googleCloud.accessToken}`);
+  else if (config.authMethod === 'bearer') headers.set('Authorization', `Bearer ${apiKey}`);
+  if (config.authMethod === 'x-api-key') {
     headers.set('x-api-key', apiKey);
-    // Anthropic also requires anthropic-version header
-    if (!headers.has('anthropic-version')) {
-      headers.set('anthropic-version', '2023-06-01');
-    }
+    if (!headers.has('anthropic-version')) headers.set('anthropic-version', '2023-06-01');
   }
-  // query-param auth is handled in buildUpstreamUrl
-
-  return headers;
+  if (!googleCloud && config.authMethod === 'query-param') url.searchParams.set('key', apiKey);
+  return [url, headers];
 }
 
-/**
- * Create a proxy handler for a specific provider.
- * Returns a Hono middleware that forwards requests as-is.
- */
-export function proxyHandler(provider: ProviderName): MiddlewareHandler {
-  return async (c: Context) => {
-    const userId = c.get('userId') as string;
-    const requestId = crypto.randomUUID();
-    const startTime = Date.now();
-
-    // Build upstream URL
-    // Reason: Hono's c.req.query() returns Record<string, string | string[]> but URLSearchParams
-    // only accepts Record<string, string>. Single-value params are always strings in practice.
-    const queryParams = c.req.query()
-      ? new URLSearchParams(c.req.query() as unknown as Record<string, string>).toString()
-      : '';
-    const upstreamUrl = buildUpstreamUrl(c.req.path, provider, queryParams);
-
-    // Build upstream headers (swap auth, forward everything else)
-    const upstreamHeaders = buildUpstreamHeaders(c.req.raw.headers, provider);
-
-    // Forward the raw request body without parsing
-    const body = c.req.raw.body;
-
-    try {
-      // Forward request to upstream provider
-      const upstreamResponse = await fetch(upstreamUrl, {
-        method: c.req.method,
-        headers: upstreamHeaders,
-        body: body,
-        // @ts-expect-error — Node.js fetch supports duplex for streaming request bodies
-        duplex: 'half',
-      });
-
-      const latencyMs = Date.now() - startTime;
-      const contentType = upstreamResponse.headers.get('content-type') || '';
-      const isStreaming = contentType.includes('text/event-stream');
-
-      // Build response headers (forward provider headers to client)
-      const responseHeaders = new Headers();
-      for (const [key, value] of upstreamResponse.headers.entries()) {
-        // Skip hop-by-hop headers
-        const lower = key.toLowerCase();
-        if (lower === 'transfer-encoding' || lower === 'connection') continue;
-        responseHeaders.set(key, value);
-      }
-      responseHeaders.set('x-relay-request-id', requestId);
-
-      if (!upstreamResponse.body) {
-        return new Response(null, {
-          status: upstreamResponse.status,
-          headers: responseHeaders,
-        });
-      }
-
-      if (isStreaming) {
-        // SSE streaming: pipe through unchanged, tee for usage extraction
-        const [clientStream, usageStream] = upstreamResponse.body.tee();
-
-        // Async usage extraction — does not block the client stream
-        extractAndLogUsage(usageStream, provider, userId, requestId, latencyMs).catch(
-          (err) => {
-            const msg = err instanceof Error ? err.message : 'Unknown error';
-            console.error(`[Relay] Usage logging failed: ${msg}`);
-          },
-        );
-
-        return new Response(clientStream, {
-          status: upstreamResponse.status,
-          headers: responseHeaders,
-        });
-      } else {
-        // Non-streaming: read body, log usage, return
-        const responseBody = await upstreamResponse.arrayBuffer();
-
-        // Async usage extraction from the response body
-        extractAndLogUsageFromBody(
-          new Uint8Array(responseBody),
-          provider,
-          userId,
-          requestId,
-          latencyMs,
-          upstreamResponse.status,
-        ).catch((err) => {
-          const msg = err instanceof Error ? err.message : 'Unknown error';
-          console.error(`[Relay] Usage logging failed: ${msg}`);
-        });
-
-        return new Response(responseBody, {
-          status: upstreamResponse.status,
-          headers: responseHeaders,
-        });
-      }
-    } catch (error) {
-      // Reason: Only log error.message — the full error object from fetch can contain
-      // the upstream URL with embedded API keys (e.g. Google's ?key=... query param).
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      console.error(`[Relay] Proxy error for ${provider}: ${msg}`);
-      // Reason: Never forward raw error.message to client — it may contain the
-      // upstream URL with embedded API keys (e.g. Google's ?key=... query param).
-      return c.json({ error: 'Upstream request failed' }, 502);
-    }
+async function defaultObserver(event: UsageObservation): Promise<void> {
+  if (event.outcome !== 'complete' || !event.usage) {
+    console.error(`[Relay] Usage unresolved request=${event.requestId} outcome=${event.outcome}`);
+    return;
+  }
+  const record: UsageRecord = {
+    ...event,
+    ...event.usage,
+    model: event.usage.model || 'unknown',
   };
+  await logUsage(record);
 }
 
-/**
- * Extract token usage from a streaming response (SSE).
- * Reads the tee'd stream to find the final chunk with usage data.
- * This runs concurrently with the client receiving the response.
- */
-async function extractAndLogUsage(
+async function observeResponse(
   stream: ReadableStream<Uint8Array>,
-  provider: ProviderName,
-  userId: string,
-  requestId: string,
-  latencyMs: number,
+  streaming: boolean,
+  metadata: Omit<UsageObservation, 'outcome' | 'usage'>,
+  observe: (event: UsageObservation) => Promise<void>,
 ): Promise<void> {
-  const decoder = new TextDecoder();
   const reader = stream.getReader();
-  let fullText = '';
-
+  const decoder = new TextDecoder();
+  const sse = new SseUsageReader(metadata.provider);
+  let body = '';
+  let usage: ParsedUsage | null = null;
+  let outcome: UsageObservation['outcome'] = 'unavailable';
   try {
-    while (true) {
+    for (;;) {
       const { done, value } = await reader.read();
+      const text = decoder.decode(value, { stream: !done });
+      if (streaming) sse.push(text);
+      else {
+        body += text;
+        if (body.length > 4_194_304) throw new Error('Usage body exceeds observation limit');
+      }
       if (done) break;
-      fullText += decoder.decode(value, { stream: true });
     }
+    usage = streaming ? sse.finish() : parseUsageFromBody(body, metadata.provider);
+    outcome = usage ? 'complete' : 'unavailable';
+  } catch {
+    outcome = 'interrupted';
+    // Do not await tee cancellation: the independent client branch may still be live.
+    void reader.cancel().catch(() => {});
   } finally {
     reader.releaseLock();
   }
-
-  // Parse usage from the accumulated SSE text
-  const usage = parseUsageFromSSE(fullText, provider);
-  if (usage) {
-    await logUsage({
-      userId,
-      provider,
-      model: usage.model || 'unknown',
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cachedInputTokens: usage.cachedInputTokens,
-      cacheCreationTokens: usage.cacheCreationTokens,
-      requestId,
-      latencyMs,
-      statusCode: 200,
-    });
-  }
+  await observe({ ...metadata, outcome, usage });
 }
 
-/**
- * Extract token usage from a non-streaming response body.
- */
-async function extractAndLogUsageFromBody(
-  body: Uint8Array,
+function clientResponse(
+  stream: ReadableStream<Uint8Array>,
+  abort: AbortController,
+): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          reader.releaseLock();
+        } else controller.enqueue(value);
+      } catch (error) {
+        controller.error(error);
+        reader.releaseLock();
+      }
+    },
+    cancel() {
+      abort.abort();
+      void reader.cancel().catch(() => {});
+    },
+  });
+}
+
+/** Forward raw bytes once; observe usage separately and propagate client cancellation. */
+export function proxyHandler(
   provider: ProviderName,
-  userId: string,
-  requestId: string,
-  latencyMs: number,
-  statusCode: number,
-): Promise<void> {
-  const text = new TextDecoder().decode(body);
-  const usage = parseUsageFromBody(text, provider);
-  if (usage) {
-    await logUsage({
-      userId,
-      provider,
-      model: usage.model || 'unknown',
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cachedInputTokens: usage.cachedInputTokens,
-      cacheCreationTokens: usage.cacheCreationTokens,
-      requestId,
-      latencyMs,
-      statusCode,
-    });
-  }
-}
-
-export interface ParsedUsage {
-  model: string | null;
-  inputTokens: number;
-  outputTokens: number;
-  cachedInputTokens: number;
-  cacheCreationTokens: number;
-}
-
-/**
- * Parse usage from a non-streaming response body.
- * Each provider reports usage differently.
- *
- * Semantic normalization:
- * - inputTokens always = total prompt tokens (including cached)
- * - Anthropic: input_tokens does NOT include cache tokens, so we add them back
- * - OpenAI/Google: prompt_tokens already includes cached, use as-is
- *
- * @param body - Raw (non-streaming) response body text.
- * @param provider - Upstream provider the request was proxied to (selects the usage schema).
- * @returns Parsed token usage, or null when the payload carries no usage block.
- */
-export function parseUsageFromBody(body: string, provider: ProviderName): ParsedUsage | null {
-  try {
-    const json = JSON.parse(body);
-
-    switch (provider) {
-      case 'deepseek':
-      case 'openai': {
-        // Reason: Chat Completions reports prompt_tokens/completion_tokens; the
-        // Responses API reports input_tokens/output_tokens (with
-        // input_tokens_details.cached_tokens). Missing the second shape logged the
-        // pro-tier Responses-only models at 0 tokens — billed $0.
-        const u = json.usage;
-        if (provider === 'deepseek' && !u) return null;
-        return {
-          model: json.model,
-          inputTokens: u?.prompt_tokens || u?.input_tokens || 0,
-          outputTokens: u?.completion_tokens || u?.output_tokens || 0,
-          cachedInputTokens:
-            provider === 'deepseek'
-              ? u?.prompt_cache_hit_tokens || 0
-              : u?.prompt_tokens_details?.cached_tokens || u?.input_tokens_details?.cached_tokens || 0,
-          cacheCreationTokens: 0,
-        };
-      }
-      case 'anthropic': {
-        const baseInput = json.usage?.input_tokens || 0;
-        const cacheRead = json.usage?.cache_read_input_tokens || 0;
-        const cacheCreate = json.usage?.cache_creation_input_tokens || 0;
-        return {
-          model: json.model,
-          // Reason: Anthropic's input_tokens does NOT include cache tokens.
-          // Normalize to total for consistent cost calculation.
-          inputTokens: baseInput + cacheRead + cacheCreate,
-          outputTokens: json.usage?.output_tokens || 0,
-          cachedInputTokens: cacheRead,
-          cacheCreationTokens: cacheCreate,
-        };
-      }
-      case 'google':
-        return {
-          model: json.modelVersion || null,
-          inputTokens: json.usageMetadata?.promptTokenCount || 0,
-          outputTokens: json.usageMetadata?.candidatesTokenCount || 0,
-          cachedInputTokens: json.usageMetadata?.cachedContentTokenCount || 0,
-          cacheCreationTokens: 0,
-        };
-      default:
-        return null;
-    }
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Parse usage from SSE streaming text.
- * Looks for the final chunk containing usage information.
- *
- * Semantic normalization:
- * - inputTokens always = total prompt tokens (including cached)
- * - Anthropic: message_start sets input/cache fields; message_delta only updates outputTokens (cache fields preserved)
- *
- * @param sseText - Full accumulated SSE stream text.
- * @param provider - Upstream provider the request was proxied to (selects the usage schema).
- * @returns Parsed token usage, or null when the payload carries no usage block.
- */
-export function parseUsageFromSSE(sseText: string, provider: ProviderName): ParsedUsage | null {
-  const lines = sseText.split('\n');
-  let lastModel: string | null = null;
-  let lastUsage: ParsedUsage | null = null;
-
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
-    const data = line.slice(6).trim();
-    if (data === '[DONE]') continue;
-
+  options: ProxyOptions = {},
+): MiddlewareHandler {
+  return async (c) => {
+    const requestId = options.requestId ?? crypto.randomUUID();
+    const apiKey = options.apiKey ?? process.env[PROVIDERS[provider].apiKeyEnvVar];
+    const googleCloud = options.googleCloud;
+    if (googleCloud) {
+      if (
+        provider !== 'google' ||
+        !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(googleCloud.project) ||
+        !googleCloud.accessToken
+      )
+        return c.json({ error: 'Provider is not configured' }, 503);
+      if (
+        !/\/v1beta\/models\/[a-zA-Z0-9._-]+:(streamGenerateContent|generateContent)$/.test(
+          c.req.path,
+        )
+      )
+        return c.json({ error: 'Unsupported provider endpoint' }, 404);
+    } else if (!apiKey) return c.json({ error: 'Provider is not configured' }, 503);
+    const [url, headers] = upstreamRequest(c, provider, apiKey ?? '', googleCloud);
+    const abort = new AbortController();
+    const signal = AbortSignal.any([c.req.raw.signal, abort.signal]);
+    const startTime = Date.now();
     try {
-      const json = JSON.parse(data);
-
-      switch (provider) {
-        case 'deepseek':
-        case 'openai': {
-          // Reason: Responses API streams carry model + usage under `response.*` on the
-          // terminal `response.completed` event, not at the top level like Chat.
-          if (json.model) lastModel = json.model;
-          if (json.response?.model) lastModel = json.response.model;
-          const u = json.usage ?? json.response?.usage;
-          if (u) {
-            lastUsage = {
-              model: lastModel,
-              inputTokens: u.prompt_tokens || u.input_tokens || 0,
-              outputTokens: u.completion_tokens || u.output_tokens || 0,
-              cachedInputTokens:
-                provider === 'deepseek'
-                  ? u.prompt_cache_hit_tokens || 0
-                  : u.prompt_tokens_details?.cached_tokens || u.input_tokens_details?.cached_tokens || 0,
-              cacheCreationTokens: 0,
-            };
-          }
-          break;
-        }
-        case 'anthropic': {
-          if (json.type === 'message_start' && json.message?.model) {
-            lastModel = json.message.model;
-          }
-          // Reason: message_start.usage has input_tokens + cache fields.
-          // message_delta.usage typically only has output_tokens.
-          // We must NOT overwrite input/cache values from message_start with zeros from message_delta.
-          if (json.type === 'message_start' && json.message?.usage) {
-            const u = json.message.usage;
-            const baseInput = u.input_tokens || 0;
-            const cacheRead = u.cache_read_input_tokens || 0;
-            const cacheCreate = u.cache_creation_input_tokens || 0;
-            lastUsage = {
-              model: lastModel,
-              inputTokens: baseInput + cacheRead + cacheCreate,
-              outputTokens: u.output_tokens || 0,
-              cachedInputTokens: cacheRead,
-              cacheCreationTokens: cacheCreate,
-            };
-          }
-          if (json.type === 'message_delta' && json.usage) {
-            if (lastUsage) {
-              lastUsage.outputTokens = json.usage.output_tokens || 0;
-            } else {
-              lastUsage = {
-                model: lastModel,
-                inputTokens: 0,
-                outputTokens: json.usage.output_tokens || 0,
-                cachedInputTokens: 0,
-                cacheCreationTokens: 0,
-              };
-            }
-          }
-          break;
-        }
-        case 'google':
-          if (json.usageMetadata) {
-            lastUsage = {
-              model: json.modelVersion || lastModel,
-              inputTokens: json.usageMetadata.promptTokenCount || 0,
-              outputTokens: json.usageMetadata.candidatesTokenCount || 0,
-              cachedInputTokens: json.usageMetadata.cachedContentTokenCount || 0,
-              cacheCreationTokens: 0,
-            };
-          }
-          break;
+      const init: RequestInit & { duplex: 'half' } = {
+        method: c.req.method,
+        headers,
+        body: c.req.raw.body,
+        duplex: 'half',
+        signal,
+        redirect: 'manual',
+      };
+      const upstream = await fetch(url.toString(), init);
+      if (upstream.status >= 300 && upstream.status < 400) {
+        void upstream.body?.cancel();
+        return c.json({ error: 'Unexpected upstream redirect' }, 502);
       }
+      const responseHeaders = new Headers(upstream.headers);
+      for (const name of [
+        'transfer-encoding',
+        'connection',
+        'set-cookie',
+        'authorization',
+        'x-api-key',
+        'x-goog-api-key',
+      ]) {
+        responseHeaders.delete(name);
+      }
+      responseHeaders.set('x-relay-request-id', requestId);
+      responseHeaders.set('cache-control', 'no-store, no-transform');
+      // Provider errors are delivered unchanged and never treated as billable output.
+      if (!upstream.ok || !upstream.body) {
+        return new Response(upstream.body, {
+          status: upstream.status,
+          headers: responseHeaders,
+        });
+      }
+      const [clientStream, usageStream] = upstream.body.tee();
+      const observation = observeResponse(
+        usageStream,
+        (upstream.headers.get('content-type') ?? '').includes('text/event-stream'),
+        {
+          requestId,
+          userId: c.get('userId') as string,
+          provider,
+          statusCode: upstream.status,
+          latencyMs: Date.now() - startTime,
+        },
+        options.observe ?? defaultObserver,
+      ).catch(() => {
+        console.error(`[Relay] Usage delivery failed request=${requestId}`);
+      });
+      options.waitUntil?.(observation);
+      return new Response(clientResponse(clientStream, abort), {
+        status: upstream.status,
+        headers: responseHeaders,
+      });
     } catch {
-      // Skip unparseable SSE chunks — normal for partial data
+      // Fetch errors can contain the provider URL and its Google API key.
+      return c.json(
+        {
+          error: signal.aborted ? 'Request canceled' : 'Upstream request failed',
+        },
+        502,
+      );
     }
-  }
-
-  return lastUsage;
+  };
 }

@@ -63,34 +63,40 @@ function extractToken(c: { req: { header: (name: string) => string | undefined }
  * - 401 if JWT is invalid, expired, or malformed
  */
 export const authMiddleware: MiddlewareHandler = async (c, next) => {
-  const token = extractToken(c);
+  return createAuthMiddleware(getJwtSecret())(c, next);
+};
 
-  if (!token) {
-    return c.json({ error: 'Missing or invalid Authorization header' }, 401);
-  }
+/** Validate provider-native credential headers with a request-scoped signing key. */
+export function createAuthMiddleware(secret: Uint8Array): MiddlewareHandler {
+  return async (c, next) => {
+    const token = extractToken(c);
 
-  try {
-    const { payload } = await jose.jwtVerify(token, getJwtSecret(), {
-      algorithms: ['HS256'],
-    });
-
-    const userId = payload.sub;
-    if (!userId) {
-      return c.json({ error: 'JWT missing sub claim' }, 401);
+    if (!token) {
+      return c.json({ error: 'Missing or invalid Authorization header' }, 401);
     }
 
-    // Set userId on context for downstream handlers
-    c.set('userId', userId);
+    try {
+      const { payload } = await jose.jwtVerify(token, secret, {
+        algorithms: ['HS256'],
+      });
 
+      const userId = payload.sub;
+      if (!userId) {
+        return c.json({ error: 'JWT missing sub claim' }, 401);
+      }
+
+      // Set userId on context for downstream handlers
+      c.set('userId', userId);
+    } catch (error) {
+      const message =
+        error instanceof jose.errors.JWTExpired
+          ? 'Token expired'
+          : error instanceof jose.errors.JWTClaimValidationFailed
+            ? 'Token validation failed'
+            : 'Invalid token';
+
+      return c.json({ error: message }, 401);
+    }
     await next();
-  } catch (error) {
-    const message =
-      error instanceof jose.errors.JWTExpired
-        ? 'Token expired'
-        : error instanceof jose.errors.JWTClaimValidationFailed
-          ? 'Token validation failed'
-          : 'Invalid token';
-
-    return c.json({ error: message }, 401);
-  }
-};
+  };
+}

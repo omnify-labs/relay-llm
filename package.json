@@ -12,7 +12,16 @@
     "lint": "eslint src/",
     "test": "vitest",
     "prices:check": "tsx scripts/litellm-prices-check.ts",
-    "test:coverage": "vitest run --coverage --coverage.include=src/**"
+    "test:coverage": "vitest run --coverage --coverage.include=src/**",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "build:worker": "wrangler deploy --dry-run --outdir dist/worker",
+    "test:database": "tsx scripts/test-edge-database.ts",
+    "test:live": "tsx scripts/test-edge-live.ts",
+    "test:benchmark": "node --test scripts/benchmark-relay.test.mjs scripts/benchmark-relay-soak.test.mjs",
+    "benchmark:relay": "node scripts/benchmark-relay.mjs",
+    "benchmark:soak": "node scripts/benchmark-relay-soak.mjs",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy --config wrangler.staging.json"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
@@ -21,17 +30,22 @@
     "postgres": "^3.4.9"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.8.69",
+    "@cloudflare/workers-types": "5.20261027.1",
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.58.2",
     "@typescript-eslint/parser": "^8.58.2",
     "@vitest/coverage-v8": "^3.2.4",
     "eslint": "^9.0.0",
+    "prettier": "3.8.1",
     "tsup": "^8.0.0",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.58.2",
-    "vitest": "^3.2.4"
+    "undici": "6.29.1",
+    "vitest": "^3.2.4",
+    "wrangler": "4.154.0"
   },
   "engines": {
     "node": ">=20"
