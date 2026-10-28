@@ -76,6 +76,18 @@ test("DeepSeek role, reasoning and usage do not count as answer text", () => {
   assert.equal(timer.terminal, true);
 });
 
+test('long answer pauses are counted independently of metadata events', () => {
+  const timer = new AnswerTimer(false);
+  timer.push('data: {"choices":[{"delta":{"content":"你"}}]}\n\n', 100);
+  timer.push('data: {"choices":[{"delta":{"reasoning_content":"ignored"}}]}\n\n', 1000);
+  timer.push('data: {"choices":[{"delta":{"content":"好"}}]}\n\n', 2200);
+  timer.push('data: {"choices":[{"delta":{"content":"！"}}]}\n\n', 7300);
+  assert.equal(timer.answerEvents, 3);
+  assert.equal(timer.gapsOver2s, 2);
+  assert.equal(timer.gapsOver5s, 1);
+  assert.equal(timer.maxTextGapMs, 5100);
+});
+
 test("failed pairs remain in failure totals and are excluded from matched speed statistics", () => {
   const row = {
     model: "deepseek-flash",

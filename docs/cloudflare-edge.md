@@ -176,6 +176,49 @@ so it measures the deployed paths and cannot attribute all differences to Cloudf
 A regional cloud VM establishes performance from that data-center network. It does not
 measure browser rendering, residential/mobile networks or mainland China routing.
 
+### Sustained regional comparison
+
+`pnpm benchmark:soak` keeps all three models active throughout a 10, 15 or 20 minute
+measurement window. Run it on the regional client machine, with Node 20+ and the
+repository dependencies installed. Create a mode-0600 private JSON file containing
+`token`, `location`, `minutes: 20` and the unchanged staging `edgeVersion`. The user
+session must remain valid for the entire run plus five minutes.
+
+```bash
+BENCH_CONFIG=.cache/soak-env.json BENCH_OUTPUT=.cache/hk-soak-results.json pnpm benchmark:soak
+```
+
+Each model has an independent sequential lane. A matched pair starts every 20 seconds,
+or when the previous pair finishes if it took longer. There is no catch-up burst. The
+lanes alternate short Chinese replies, synthetic longer-context summaries and roughly
+600-character stories that exercise streaming. Identical request bytes and model
+settings go to both endpoints; their order alternates within each workload. The last
+pair may finish after the scheduling window, and actual duration is recorded.
+Six warmups occur before that window and remain separate from measured results.
+
+The pinned Undici client uses one HTTP/1.1 keep-alive pool per model and endpoint,
+with a 60-second idle allowance. Native socket diagnostics record actual reuse and
+reconnection, including cases where the server closes an idle connection. This tests
+repeated requests and longer streams over a sustained session; it does not force one
+LLM response to remain open for 20 minutes. It also does not reproduce browser HTTP/2
+or HTTP/3 behavior.
+
+The private report includes first-answer and completion p50/p95, maximum answer and
+raw-byte gaps, counts of answer pauses of at least two and five seconds, failures,
+mid-stream errors, and connection reuse. Results are split by model, workload and
+two-minute windows. Failed pairs remain visible and are excluded only from matched
+speed calculations. HTTP 401/402/403 stops the session, including during warmup; other warmup failures
+remain separate and do not prevent measuring persistent provider errors for the full
+window. Measured requests have no automatic LLM retries. Bodies, headers and credentials are never
+written to the report. `pnpm test:benchmark` verifies timing, scheduling, failure
+accounting and actual TCP reuse against a local server without provider calls.
+
+For regional comparisons, leave both deployments and account placement unchanged,
+record the VM zone and staging revision, and retain the full run even if the edge
+loses. Compare latency, stalls and failures across the entire period before drawing a
+conclusion. A cloud VM result supports only that network and observation window; it
+does not establish mainland customer performance. The result summaries below distinguish locations and provider failures.
+
 ## Incomplete usage
 
 ```sql
@@ -288,3 +331,92 @@ The temporary Tokyo VM, disk and project SSH key were removed. Production routin
 billing remain unchanged. The prototype is ready for review; a blanket Gemini cutover
 is not supported by these latency results. The 30-second external-policy update window
 also remains staging-only pending the product decision described above.
+
+## Sustained Singapore and Hong Kong results — 2026-10-28 UTC
+
+The unchanged Worker `e777c325-3e93-4283-9501-43eb040f7648` was compared with
+`relay.dassi.ai` using the sustained protocol above. DigitalOcean `sgp1` ran
+17:39:06–17:59:10 UTC (1,204 seconds, 360 measured requests); Google Cloud
+`asia-east2-b` ran 17:45:22–18:05:22 UTC (1,200 seconds, 354 measured requests).
+Both used Node 22.23.4 and Undici 6.29.1. Each location excluded six warmups.
+Every completed pair had matching body hashes. All models were sampled throughout;
+endpoint order differed by at most one pair within each model/workload. Variable
+response durations and the scheduling deadline produced 59/61/60 Singapore pairs
+and 57/60/60 Hong Kong pairs for Flash/Flash-Lite/DeepSeek respectively.
+
+Times below are successful-request first-answer p50/p95 in milliseconds; errors
+are counted separately and never treated as fast replies. Percentiles use nearest rank.
+
+| Location | Model | Current p50 / p95 | Edge p50 / p95 | Current failures | Edge failures |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Singapore | Gemini 3.8 Flash | 2,169 / 7,759 | 2,366 / 11,321 | 0/59 | 1/59 |
+| Singapore | Gemini 3.5 Flash-Lite | 869 / 1,274 | 1,095 / 1,350 | 0/61 | 1/61 |
+| Singapore | DeepSeek Flash | 1,057 / 1,300 | 667 / 938 | 0/60 | 6/60 |
+| Hong Kong | Gemini 3.8 Flash | 2,209 / 11,418 | No successful responses | 1/57 | 57/57 |
+| Hong Kong | Gemini 3.5 Flash-Lite | 794 / 1,245 | No successful responses | 0/60 | 60/60 |
+| Hong Kong | DeepSeek Flash | 793 / 1,069 | 650 / 862 | 0/60 | 14/60 |
+
+DeepSeek's median within-pair first-answer savings were **327 ms (34.7%) in
+Singapore**, winning 52/54 completed pairs, and **145 ms (20.6%) in Hong Kong**,
+winning 33/46 completed pairs. Savings were positive across all three workloads
+in each location. Singapore had positive paired medians in all ten two-minute
+windows, although the 8–10 minute window retained only one complete pair after
+failures. Hong Kong had positive paired medians in seven of ten windows; later
+windows had few complete pairs because streams failed. This is a speed benefit
+among completed requests, not a reliable-service improvement.
+
+Singapore Gemini Flash and Flash-Lite had median paired penalties of **349 ms
+and 223 ms**; the edge won only 22/58 and 13/60 completed pairs. Both penalties
+persisted across all three workloads. Successful completion p50/p95 were:
+
+| Location / model | Current completion | Edge completion |
+| --- | ---: | ---: |
+| Singapore / Flash | 5,512 / 11,262 ms | 3,284 / 11,598 ms |
+| Singapore / Flash-Lite | 1,115 / 2,824 ms | 1,442 / 2,990 ms |
+| Singapore / DeepSeek | 1,496 / 5,687 ms | 1,062 / 5,082 ms |
+| Hong Kong / Flash | 4,037 / 11,956 ms | No successful responses |
+| Hong Kong / Flash-Lite | 1,094 / 2,986 ms | No successful responses |
+| Hong Kong / DeepSeek | 1,177 / 4,769 ms | 958 / 4,974 ms |
+
+The sustained run exposed two distinct deployment problems:
+
+- All 117 Hong Kong edge Gemini requests returned HTTP 400. Separate diagnostic
+  calls for both models confirmed `FAILED_PRECONDITION` with an unsupported-location
+  error. [Google's Gemini API region list](https://ai.google.dev/gemini-api/docs/available-regions)
+  excludes Hong Kong. The initial Hong Kong preflight stopped before measurement;
+  its two requests and two diagnostic calls remain separate. The runner then retained
+  non-access warmup errors and measured the complete 20-minute window without a relay change.
+- All **14 Hong Kong DeepSeek stream failures** matched request IDs with Cloudflare
+  outcome `exceededCpu`. Every one had already delivered some answer text. Cloudflare
+  documents this as [CPU-limit termination](https://developers.cloudflare.com/workers/platform/limits/#cpu-time).
+  The effective account CPU budget was not verified; the script has no explicit
+  `limits` setting. Singapore had eight empty/incomplete/unreadable stream failures
+  on the edge, but capture started after that cluster, so their exact cause is unconfirmed.
+  The current relay had one Hong Kong Flash timeout before headers at the 90-second limit.
+
+Persistent connections were actually exercised. After warmup, Singapore reused
+connections for 180/180 current and 177/180 edge requests; Hong Kong reused them
+for 176/177 current and 175/177 edge requests. Some sockets spanned the entire
+session. Both paths reported local Cloudflare ingress (`SIN` or `HKG`). There were
+no measured gaps of two seconds between received answer events, but this does not
+negate truncated streams or the pre-answer timeout. Client cancellation of failed
+responses can also close a socket, so reconnect counts alone are not network-failure counts.
+
+Matched admission logs captured after the Singapore failure cluster showed median
+admission of 106 ms for 88 Singapore requests and 73 ms for 145 Hong Kong requests.
+The production relay container's Google and DeepSeek keys matched the saved staging
+provisioning file in a private comparison; live Worker secrets cannot be read back.
+
+These runs support a DeepSeek latency opportunity and reject a blanket customer
+cutover of this staging deployment. Provider-region compatibility and CPU-limit
+terminations need resolution before repeating the same sustained test. These are
+cloud VM HTTP/1.1 sessions, not browser HTTP/2/3 or mainland residential/mobile tests.
+The runs partly overlapped using one test account, with up to three active model
+requests per location; they are not independent measurements of whole-region performance.
+
+The reusable runner passed 12 nonlive benchmark tests, 224 unit tests, typecheck,
+lint and the Node build. Raw results, sanitized Worker evidence and the time-series
+chart remain in ignored local storage. Both temporary VMs and disks were removed;
+the existing SSH key was reused, with Hong Kong access scoped to that instance.
+Production routing, provider configuration, billing architecture and Worker deployment
+were unchanged throughout the experiment.

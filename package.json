@@ -17,8 +17,9 @@
     "build:worker": "wrangler deploy --dry-run --outdir dist/worker",
     "test:database": "tsx scripts/test-edge-database.ts",
     "test:live": "tsx scripts/test-edge-live.ts",
-    "test:benchmark": "node --test scripts/benchmark-relay.test.mjs",
+    "test:benchmark": "node --test scripts/benchmark-relay.test.mjs scripts/benchmark-relay-soak.test.mjs",
     "benchmark:relay": "node scripts/benchmark-relay.mjs",
+    "benchmark:soak": "node scripts/benchmark-relay-soak.mjs",
     "dev:worker": "wrangler dev",
     "deploy:worker": "wrangler deploy --config wrangler.staging.json"
   },
@@ -42,6 +43,7 @@
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.58.2",
+    "undici": "6.29.1",
     "vitest": "^3.2.4",
     "wrangler": "4.154.0"
   },

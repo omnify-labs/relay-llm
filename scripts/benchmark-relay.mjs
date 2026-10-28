@@ -3,11 +3,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID, randomInt, createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
-const endpoints = {
+export const endpoints = {
   current: "https://relay.dassi.ai",
   edge: "https://dassi-relay-edge-mvp.kklt92.workers.dev",
 };
-const models = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "deepseek-flash"];
+export const models = ["gemini-3.8-flash", "gemini-3.5-flash-lite", "deepseek-flash"];
 
 /** Parse native SSE incrementally and time answer text, excluding reasoning/metadata. */
 export class AnswerTimer {
@@ -16,6 +16,9 @@ export class AnswerTimer {
   lastTextMs = null;
   maxTextGapMs = 0;
   textChars = 0;
+  answerEvents = 0;
+  gapsOver2s = 0;
+  gapsOver5s = 0;
   usage = null;
   modelVersion = null;
   finishReason = null;
@@ -66,17 +69,23 @@ export class AnswerTimer {
       : (choice?.delta?.content ?? "");
     if (!answer.length) return;
     this.firstTextMs ??= elapsed;
-    if (this.lastTextMs !== null)
+    if (this.lastTextMs !== null) {
+      const gap = elapsed - this.lastTextMs;
+      if (gap >= 2000) this.gapsOver2s++;
+      if (gap >= 5000) this.gapsOver5s++;
       this.maxTextGapMs = Math.max(
         this.maxTextGapMs,
         elapsed - this.lastTextMs,
       );
+    }
     this.lastTextMs = elapsed;
     this.textChars += answer.length;
+    this.answerEvents++;
   }
 }
 
-function payload(model, scenario, label) {
+/** Build a native-provider request for the model, synthetic workload and unique pair label. */
+export function payload(model, scenario, label) {
   const prompt =
     scenario === "short"
       ? `测试编号 ${label}。请只回复：你好，今天也要开心。`
@@ -109,7 +118,7 @@ function payload(model, scenario, label) {
 }
 
 /** Send one request, consuming all output and preserving failure timings in the result. */
-export async function measure(endpoint, model, body, token, runId) {
+export async function measure(endpoint, model, body, token, runId, options = {}) {
   const google = model.startsWith("gemini");
   const path = google
     ? `/v1/google/v1beta/models/${model}:streamGenerateContent?alt=sse`
@@ -125,9 +134,13 @@ export async function measure(endpoint, model, body, token, runId) {
     requestId: null,
     colo: null,
     error: null,
+    errorCode: null,
+    maxByteGapMs: 0,
+    wireChunks: 0,
   };
+  let lastByteMs = null;
   try {
-    const response = await fetch(endpoints[endpoint] + path, {
+    const response = await (options.fetchImpl ?? globalThis.fetch)(endpoints[endpoint] + path, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -135,6 +148,7 @@ export async function measure(endpoint, model, body, token, runId) {
         "x-dassi-run-id": runId,
       },
       body,
+      ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
       signal: AbortSignal.timeout(90_000),
       redirect: "error",
     });
@@ -156,7 +170,12 @@ export async function measure(endpoint, model, body, token, runId) {
       for (;;) {
         const { done, value } = await reader.read();
         const ms = elapsed();
-        if (value?.length) result.firstBytesMs ??= ms;
+        if (value?.length) {
+          result.firstBytesMs ??= ms;
+          if (lastByteMs !== null) result.maxByteGapMs = Math.max(result.maxByteGapMs, ms - lastByteMs);
+          lastByteMs = ms;
+          result.wireChunks++;
+        }
         parser.push(decoder.decode(value, { stream: !done }), ms, done);
         if (done) break;
       }
@@ -169,6 +188,8 @@ export async function measure(endpoint, model, body, token, runId) {
     if (!["STOP", "stop"].includes(parser.finishReason))
       throw new Error("abnormal_finish");
   } catch (error) {
+    const code = error.cause?.code ?? error.code;
+    if (typeof code === "string" && /^[A-Z0-9_]{1,50}$/.test(code)) result.errorCode = code;
     const known =
       /^(http_\d+|no_answer|incomplete|abnormal_finish|not_sse|provider_error|sse_limit)$/;
     result.error = known.test(error.message)
@@ -180,9 +201,13 @@ export async function measure(endpoint, model, body, token, runId) {
   return {
     ...result,
     firstTextMs: parser.firstTextMs,
+    lastTextMs: parser.lastTextMs,
     totalMs: elapsed(),
     maxTextGapMs: parser.maxTextGapMs,
     textChars: parser.textChars,
+    answerEvents: parser.answerEvents,
+    gapsOver2s: parser.gapsOver2s,
+    gapsOver5s: parser.gapsOver5s,
     usage: parser.usage,
     modelVersion: parser.modelVersion,
     finishReason: parser.finishReason,
