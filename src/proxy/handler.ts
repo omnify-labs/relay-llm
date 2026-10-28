@@ -17,15 +17,28 @@ export interface UsageObservation {
 
 export interface ProxyOptions {
   apiKey?: string;
+  /** Native Gemini on Google Cloud; only the URL and authentication change. */
+  googleCloud?: { project: string; accessToken: string };
   requestId?: string;
   observe?: (event: UsageObservation) => Promise<void>;
   waitUntil?: (promise: Promise<unknown>) => void;
 }
 
-function upstreamRequest(c: Context, provider: ProviderName, apiKey: string): [URL, Headers] {
+function upstreamRequest(
+  c: Context,
+  provider: ProviderName,
+  apiKey: string,
+  googleCloud?: ProxyOptions['googleCloud'],
+): [URL, Headers] {
   const config = PROVIDERS[provider];
   const incoming = new URL(c.req.url);
-  const url = new URL(config.upstream + incoming.pathname.slice(config.routePrefix.length));
+  const url = googleCloud
+    ? new URL(
+        `https://aiplatform.googleapis.com/v1/projects/${googleCloud.project}` +
+          '/locations/global/publishers/google/models/' +
+          incoming.pathname.split('/').at(-1),
+      )
+    : new URL(config.upstream + incoming.pathname.slice(config.routePrefix.length));
   url.search = incoming.search;
   for (const key of ['key', 'access_token', 'api_key']) url.searchParams.delete(key);
   const headers = new Headers();
@@ -42,12 +55,13 @@ function upstreamRequest(c: Context, provider: ProviderName, apiKey: string): [U
     if (value) headers.set(name, value);
   }
   headers.set('Accept-Encoding', 'identity');
-  if (config.authMethod === 'bearer') headers.set('Authorization', `Bearer ${apiKey}`);
+  if (googleCloud) headers.set('Authorization', `Bearer ${googleCloud.accessToken}`);
+  else if (config.authMethod === 'bearer') headers.set('Authorization', `Bearer ${apiKey}`);
   if (config.authMethod === 'x-api-key') {
     headers.set('x-api-key', apiKey);
     if (!headers.has('anthropic-version')) headers.set('anthropic-version', '2023-06-01');
   }
-  if (config.authMethod === 'query-param') url.searchParams.set('key', apiKey);
+  if (!googleCloud && config.authMethod === 'query-param') url.searchParams.set('key', apiKey);
   return [url, headers];
 }
 
@@ -56,7 +70,11 @@ async function defaultObserver(event: UsageObservation): Promise<void> {
     console.error(`[Relay] Usage unresolved request=${event.requestId} outcome=${event.outcome}`);
     return;
   }
-  const record: UsageRecord = { ...event, ...event.usage, model: event.usage.model || 'unknown' };
+  const record: UsageRecord = {
+    ...event,
+    ...event.usage,
+    model: event.usage.model || 'unknown',
+  };
   await logUsage(record);
 }
 
@@ -128,8 +146,22 @@ export function proxyHandler(
   return async (c) => {
     const requestId = options.requestId ?? crypto.randomUUID();
     const apiKey = options.apiKey ?? process.env[PROVIDERS[provider].apiKeyEnvVar];
-    if (!apiKey) return c.json({ error: 'Provider is not configured' }, 503);
-    const [url, headers] = upstreamRequest(c, provider, apiKey);
+    const googleCloud = options.googleCloud;
+    if (googleCloud) {
+      if (
+        provider !== 'google' ||
+        !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(googleCloud.project) ||
+        !googleCloud.accessToken
+      )
+        return c.json({ error: 'Provider is not configured' }, 503);
+      if (
+        !/\/v1beta\/models\/[a-zA-Z0-9._-]+:(streamGenerateContent|generateContent)$/.test(
+          c.req.path,
+        )
+      )
+        return c.json({ error: 'Unsupported provider endpoint' }, 404);
+    } else if (!apiKey) return c.json({ error: 'Provider is not configured' }, 503);
+    const [url, headers] = upstreamRequest(c, provider, apiKey ?? '', googleCloud);
     const abort = new AbortController();
     const signal = AbortSignal.any([c.req.raw.signal, abort.signal]);
     const startTime = Date.now();
@@ -162,7 +194,10 @@ export function proxyHandler(
       responseHeaders.set('cache-control', 'no-store, no-transform');
       // Provider errors are delivered unchanged and never treated as billable output.
       if (!upstream.ok || !upstream.body) {
-        return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
+        return new Response(upstream.body, {
+          status: upstream.status,
+          headers: responseHeaders,
+        });
       }
       const [clientStream, usageStream] = upstream.body.tee();
       const observation = observeResponse(
@@ -187,7 +222,9 @@ export function proxyHandler(
     } catch {
       // Fetch errors can contain the provider URL and its Google API key.
       return c.json(
-        { error: signal.aborted ? 'Request canceled' : 'Upstream request failed' },
+        {
+          error: signal.aborted ? 'Request canceled' : 'Upstream request failed',
+        },
         502,
       );
     }

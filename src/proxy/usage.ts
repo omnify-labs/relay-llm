@@ -67,7 +67,10 @@ export function parseUsageFromBody(body: string, provider: ProviderName): Parsed
         return {
           model: json.modelVersion || null,
           inputTokens: json.usageMetadata?.promptTokenCount || 0,
-          outputTokens: json.usageMetadata?.candidatesTokenCount || 0,
+          // Google bills thinking separately from visible candidate tokens.
+          outputTokens:
+            (json.usageMetadata.candidatesTokenCount || 0) +
+            (json.usageMetadata.thoughtsTokenCount || 0),
           cachedInputTokens: json.usageMetadata?.cachedContentTokenCount || 0,
           cacheCreationTokens: 0,
         };
@@ -153,7 +156,9 @@ function applyEvent(data: string, provider: ProviderName, state: UsageState): vo
           state.usage = {
             model: json.modelVersion || state.model,
             inputTokens: json.usageMetadata.promptTokenCount || 0,
-            outputTokens: json.usageMetadata.candidatesTokenCount || 0,
+            outputTokens:
+              (json.usageMetadata.candidatesTokenCount || 0) +
+              (json.usageMetadata.thoughtsTokenCount || 0),
             cachedInputTokens: json.usageMetadata.cachedContentTokenCount || 0,
             cacheCreationTokens: 0,
           };

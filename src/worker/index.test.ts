@@ -66,6 +66,7 @@ async function request(
   path = '/v1/deepseek/chat/completions',
   body = '{ "model": "deepseek-flash", "stream": true }',
   auth = token,
+  env = bindings,
 ) {
   const context = createExecutionContext();
   const response = await createWorkerApp(services).fetch(
@@ -79,7 +80,7 @@ async function request(
       },
       body,
     }),
-    bindings,
+    env,
     context,
   );
   const text = await response.text();
@@ -93,6 +94,54 @@ const deepseekSse =
   'data: {"usage":{"prompt_tokens":1000,"completion_tokens":100,"prompt_cache_hit_tokens":700}}\n\ndata: [DONE]\n\n';
 
 describe('actual Worker routes', () => {
+  const cloudBindings = () => ({
+    ...bindings,
+    GOOGLE_VERTEX_PROJECT: 'relay-test-project',
+    GOOGLE_VERTEX_ACCESS_TOKEN: 'vertex-secret',
+    GOOGLE_VERTEX_TOKEN_EXPIRES_AT: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  it('routes Gemini to Google Cloud through the same payer and usage observation', async () => {
+    const sse =
+      'data: {"modelVersion":"gemini-3.8-flash","usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":5}}\n\n';
+    fetchMock
+      .get('https://aiplatform.googleapis.com')
+      .intercept({
+        path: '/v1/projects/relay-test-project/locations/global/publishers/google/models/gemini-3.8-flash:streamGenerateContent?alt=sse',
+        method: 'POST',
+        headers: { authorization: 'Bearer vertex-secret' },
+        body: '{ "contents": [] }',
+      })
+      .reply(200, sse, { headers: { 'content-type': 'text/event-stream' } });
+    const result = await request(
+      '/v1/google/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=attacker',
+      '{ "contents": [] }',
+      token,
+      cloudBindings(),
+    );
+    expect(result.response.status).toBe(200);
+    expect(result.text).toBe(sse);
+    expect(services.openAccount).toHaveBeenCalledOnce();
+    expect(services.authorize).toHaveBeenCalledOnce();
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toMatchObject({
+      provider: 'google',
+      outcome: 'complete',
+    });
+  });
+  it('rejects expired Cloud credentials before creating an admission', async () => {
+    const result = await request(
+      '/v1/google/v1beta/models/gemini-3.8-flash:generateContent',
+      '{}',
+      token,
+      {
+        ...cloudBindings(),
+        GOOGLE_VERTEX_TOKEN_EXPIRES_AT: '2000-01-01T00:00:00Z',
+      },
+    );
+    expect(result.response.status).toBe(503);
+    expect(services.openAccount).not.toHaveBeenCalled();
+    expect(usages).toHaveLength(0);
+  });
   it('streams provider-native DeepSeek content with server credentials and one usage event', async () => {
     const body = '{ "model": "deepseek-flash", "stream": true }';
     fetchMock

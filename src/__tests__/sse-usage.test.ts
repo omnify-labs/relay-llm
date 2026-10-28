@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { SseUsageReader } from '../proxy/usage.js';
+import { SseUsageReader, parseUsageFromBody } from '../proxy/usage.js';
 
 describe('incremental usage observation', () => {
+  it('counts Gemini thinking once from the final cumulative usage snapshot', () => {
+    const reader = new SseUsageReader('google');
+    reader.push('data: {"usageMetadata":{"promptTokenCount":8,"thoughtsTokenCount":10}}\n\n');
+    reader.push(
+      'data: {"usageMetadata":{"promptTokenCount":8,"thoughtsTokenCount":20,"candidatesTokenCount":3}}\n\n',
+    );
+    expect(reader.finish()).toMatchObject({ inputTokens: 8, outputTokens: 23 });
+    expect(
+      parseUsageFromBody(
+        '{"usageMetadata":{"promptTokenCount":8,"thoughtsTokenCount":20}}',
+        'google',
+      ),
+    ).toMatchObject({ inputTokens: 8, outputTokens: 20 });
+  });
   it('retains Google model metadata when usage arrives in a later event', () => {
     const reader = new SseUsageReader('google');
     reader.push('data: {"modelVersion":"gemini-3.8-flash"}\r\n\r\n');

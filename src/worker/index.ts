@@ -7,11 +7,11 @@ import { proxyHandler, type UsageObservation } from '../proxy/handler.js';
 import type { ProviderName } from '../proxy/providers.js';
 import * as database from './database.js';
 import { openAccount, type RoutingEnv } from './routing.js';
+import { googleTarget, type GoogleBindings } from './google.js';
 export { AccountGate } from './account.js';
 
-export interface WorkerEnv extends RoutingEnv {
+export interface WorkerEnv extends RoutingEnv, GoogleBindings {
   JWT_SECRET: string;
-  GOOGLE_API_KEY: string;
   DEEPSEEK_API_KEY: string;
   /** Explicit account IDs for the pilot; '*' enables general access after validation. */
   ALLOWED_USER_IDS: string;
@@ -68,8 +68,13 @@ export function createWorkerApp(services: WorkerServices = { openAccount }) {
         return c.json({ error: 'Unsupported provider endpoint' }, 404);
       }
       const requestId = crypto.randomUUID();
-      const apiKey = provider === 'google' ? c.env.GOOGLE_API_KEY : c.env.DEEPSEEK_API_KEY;
-      if (!apiKey || !c.env.USAGE_QUEUE || !c.env.HYPERDRIVE || !c.env.ACCOUNTS)
+      const target =
+        provider === 'google'
+          ? googleTarget(c.env)
+          : c.env.DEEPSEEK_API_KEY
+            ? { apiKey: c.env.DEEPSEEK_API_KEY }
+            : null;
+      if (!target || !c.env.USAGE_QUEUE || !c.env.HYPERDRIVE || !c.env.ACCOUNTS)
         return c.json({ error: 'Gateway is not configured' }, 503);
       const started = Date.now();
       const cf = (c.req.raw as Request & { cf?: { country?: string } }).cf;
@@ -111,7 +116,7 @@ export function createWorkerApp(services: WorkerServices = { openAccount }) {
         }),
       );
       const response = await proxyHandler(provider, {
-        apiKey,
+        ...target,
         requestId,
         observe: (event) => account.stub.observe(event),
         waitUntil: (promise) => c.executionCtx.waitUntil(promise),

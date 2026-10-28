@@ -60,6 +60,13 @@ account object. See [Cloudflare placement semantics](https://developers.cloudfla
 
 ## Deployment
 
+Use **Workers Paid**. The Free plan's 10 ms CPU limit terminated longer native streams
+in the sustained test; network wait does not count toward this limit, but stream
+handling and usage parsing do. `wrangler.jsonc` explicitly caps CPU at 1,000 ms per
+invocation. This is a processing ceiling, not a one-second response delay or a reserved
+charge. The account must be upgraded before deploying that setting. See
+[Cloudflare CPU limits](https://developers.cloudflare.com/workers/platform/limits/#cpu-time).
+
 Use a staging database and test account first. Production requires the existing billing
 schema/functions plus [`20261027_edge_admission.sql`](migrations/20261027_edge_admission.sql)
 and [`20261028_edge_snapshots.sql`](migrations/20261028_edge_snapshots.sql), in that order.
@@ -90,6 +97,65 @@ production migration. Production cutover requires the real billing database and 
 migration; never route general traffic to a fixture DB. Only migrate clients using
 the supported managed providers. Retain the Node admin/billing endpoints and other
 provider routes; this Worker does not replace those APIs.
+
+### Google Cloud global endpoint evaluation
+
+DeepSeek continues to use `https://api.deepseek.com/chat/completions` directly.
+For Gemini, the Worker optionally maps the existing native client route to:
+
+```text
+https://aiplatform.googleapis.com/v1/projects/PROJECT/locations/global/publishers/google/models/MODEL:streamGenerateContent?alt=sse
+```
+
+`generateContent` uses the same prefix. Only the URL and provider authentication change;
+request/response bytes, model IDs, tools, thought signatures, and the payer/usage path
+remain the same. This does not call a second relay or introduce another Dassi charge.
+Google Cloud charges the configured project's billing account. See Google's
+[global endpoint documentation](https://docs.cloud.google.com/gemini-enterprise-agent-platform/resources/locations).
+
+For the bounded staging experiment, supply these Worker bindings:
+
+- `GOOGLE_VERTEX_PROJECT`: Google Cloud project ID with the AI Platform API enabled.
+- `GOOGLE_VERTEX_ACCESS_TOKEN`: secret, short-lived **service-account** access token.
+- `GOOGLE_VERTEX_TOKEN_EXPIRES_AT`: ISO expiry timestamp, accounting for clock margin.
+
+The test VM uses the existing Vertex test identity; its metadata service supplies an
+expiring token. No permanent service-account key or human OAuth token is deployed.
+Upload the token as a Wrangler secret, never a plain-text config value. Refresh it before
+the test if it cannot cover the complete run and five-minute margin. Remove the temporary
+bindings after the experiment, and delete the test VM.
+
+All three bindings must be valid. Expired, nearly expired (60 seconds), incomplete, or
+invalid Cloud configuration returns 503 before account admission. It never silently
+falls back to AI Studio. With all three absent, the original `GOOGLE_API_KEY` route
+remains available. Production requires automatic credential renewal and a sustained
+deployed test; this manually provisioned token is deliberately evaluation-only.
+
+The usage observer includes `thoughtsTokenCount` in billable Google output alongside
+`candidatesTokenCount`, using the final cumulative snapshot once. Both Gemini APIs
+report those counts separately; Google bills thinking tokens. See
+[Google thinking pricing](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking#pricing).
+
+### Follow-up checks — 2026-10-28 UTC
+
+The Cloudflare dashboard confirmed this account is on Workers Free, establishing the
+10 ms effective CPU limit behind the matched Hong Kong `exceededCpu` failures.
+The 1,000 ms configuration is prepared; a Paid-plan upgrade is still pending.
+
+Direct Google Cloud API checks from a temporary GCP VM in Hong Kong passed all 12
+scenarios across `gemini-3.8-flash` and `gemini-3.5-flash-lite`: Chinese streaming,
+tool call, tool-result follow-up, image input, cancellation, and a subsequent request.
+Both models also passed a non-streaming preflight. These are functional checks, not
+a sustained speed result or proof of Cloudflare-to-provider behavior. The previous
+20-minute results below remain the latest completed deployed comparison.
+
+The updated local workerd relay also passed all 18 real-provider scenarios across the
+two Gemini models and DeepSeek. All 18 observations settled in the isolated staging
+ledger; the 15 completed requests each had exactly one charge, the three interrupted
+requests had none, and the account balance matched recorded usage. This validates the
+new route and billing integration locally, not the deployed Cloudflare CPU setting.
+Nonlive validation passed 237 unit tests, 39 workerd tests, typecheck, lint and both
+builds. The temporary credential and local runtime are removed after evaluation.
 
 The validation deployment uses an outbound QUIC tunnel to a loopback-only isolated
 Postgres container. Its self-signed development certificate uses VPC certificate

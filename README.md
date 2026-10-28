@@ -11,6 +11,9 @@ with connection reuse and streaming-stall measurements. The sustained runner use
 the pinned Undici development dependency. The existing Node deployment remains available.
 The sustained results show DeepSeek latency gains alongside CPU-limit stream failures
 and Hong Kong Gemini regional rejections; this remains a staging prototype.
+The follow-up adds a 1,000 ms CPU cap (Workers Paid required) and an optional native
+Google Cloud global route for Gemini, with short-lived staging credentials. Direct
+Hong Kong Gemini compatibility checks pass; the updated sustained edge test is pending.
 
 LLM proxies like LiteLLM and Portkey translate your requests between provider formats. This works fine for simple chat completions. **It breaks tool calling.**
 

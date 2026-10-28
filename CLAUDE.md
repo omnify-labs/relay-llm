@@ -8,6 +8,9 @@ admission and local debits in one SQLite Durable Object per payer, refreshes acc
 snapshots through uncached Hyperdrive, and settles usage through Cloudflare Queues. See
 `docs/cloudflare-edge.md` for deployment and testing. The Worker entrypoint has a default
 export because Cloudflare requires it; reusable modules keep named exports.
+The Worker requires Paid CPU limits for sustained streams. Its optional Google Cloud
+global Gemini route uses expiring staging credentials; see the evaluation limitations
+in the edge guide. Google usage includes visible output plus billable thinking tokens.
 
 The edge prototype tests a bounded 30-second external-policy update window; this is
 not approval to change the production immediate-revocation policy described below.
