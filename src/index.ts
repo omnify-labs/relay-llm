@@ -8,6 +8,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { serve } from '@hono/node-server';
 import { proxyHandler } from './proxy/handler.js';
+import { servedGoogleModelMiddleware } from './proxy/served-models.js';
 import { authMiddleware } from './auth/jwt.js';
 import { adminAuthMiddleware } from './admin/middleware.js';
 import { adminApp } from './admin/handler.js';
@@ -38,10 +39,11 @@ app.route('/admin', adminRoutes);
 app.use('/v1/runs/*', authMiddleware);
 app.route('/', runRoutes);
 
-// LLM proxy routes — JWT auth + budget check + passthrough
-app.all('/v1/openai/*', authMiddleware, budgetMiddleware, proxyHandler('openai'));
-app.all('/v1/anthropic/*', authMiddleware, budgetMiddleware, proxyHandler('anthropic'));
-app.all('/v1/google/*', authMiddleware, budgetMiddleware, proxyHandler('google'));
+// LLM proxy routes — JWT auth + model access + budget check + passthrough.
+// Reason: only Dassi's managed models are served. There are no OpenAI or Anthropic
+// routes: every trial account holds a valid JWT, so an open route would hand it that
+// provider's whole catalog, and those request bodies (which name the model) are never read.
+app.all('/v1/google/*', authMiddleware, servedGoogleModelMiddleware, budgetMiddleware, proxyHandler('google'));
 app.all('/v1/deepseek/*', authMiddleware, paidModelMiddleware, budgetMiddleware, proxyHandler('deepseek'));
 
 // 404 for everything else

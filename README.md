@@ -105,12 +105,15 @@ The trade-off is explicit: you send requests in each provider's **native format*
 
 ## Supported Providers
 
-| Provider | Route | Upstream |
-|----------|-------|----------|
-| OpenAI | `/v1/openai/**` | `api.openai.com` |
-| Anthropic | `/v1/anthropic/**` | `api.anthropic.com` |
-| Google | `/v1/google/**` | `generativelanguage.googleapis.com` |
-| DeepSeek | `/v1/deepseek/**` | `api.deepseek.com` |
+| Provider | Route | Upstream | Served |
+|----------|-------|----------|--------|
+| Google | `/v1/google/v1beta/models/<model>:(stream)GenerateContent` | `generativelanguage.googleapis.com` | `gemini-3.8-flash`, `gemini-3.5-flash-lite` |
+| DeepSeek | `/v1/deepseek/**` | `api.deepseek.com` | Paid subscriptions only |
+
+Every free trial account holds a valid JWT, so RelayLLM forwards only the models
+Dassi offers on managed credit (`src/proxy/served-models.ts`). Any other Google model
+or endpoint gets a 403 before the budget check. OpenAI and Anthropic have no routes,
+because their request bodies name the model and RelayLLM never reads request bodies.
 
 Provider registration includes `src/proxy/providers.ts`, the authenticated route
 in `src/index.ts`, environment validation, and usage/pricing coverage. RelayLLM
@@ -187,20 +190,8 @@ curl http://localhost:8080/health
 Requests use the provider's native format. RelayLLM just forwards them.
 
 ```bash
-# OpenAI
-curl http://localhost:8080/v1/openai/v1/chat/completions \
-  -H "Authorization: Bearer <jwt>" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
-
-# Anthropic
-curl http://localhost:8080/v1/anthropic/v1/messages \
-  -H "Authorization: Bearer <jwt>" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "claude-sonnet-4-5", "max_tokens": 1024, "messages": [{"role": "user", "content": "Hello"}]}'
-
 # Google
-curl http://localhost:8080/v1/google/v1beta/models/gemini-2.0-flash:generateContent \
+curl http://localhost:8080/v1/google/v1beta/models/gemini-3.8-flash:generateContent \
   -H "Authorization: Bearer <jwt>" \
   -H "Content-Type: application/json" \
   -d '{"contents": [{"parts": [{"text": "Hello"}]}]}'

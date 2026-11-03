@@ -35,9 +35,9 @@ echo ""
 
 # 2. Auth test (no token)
 echo "--- Auth: Missing token (expect 401) ---"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$RELAY_URL/v1/openai/v1/chat/completions" \
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$RELAY_URL/v1/google/v1beta/models/gemini-3.8-flash:streamGenerateContent" \
   -X POST -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}')
+  -d '{"contents":[{"parts":[{"text":"hi"}]}]}')
 echo "Status: $HTTP_CODE"
 [ "$HTTP_CODE" = "401" ] && echo "PASS" || echo "FAIL"
 echo ""
@@ -89,52 +89,10 @@ else
   fi
 fi
 
-# 3. OpenAI passthrough
+# 3. Google Gemini passthrough (served model)
 echo ""
-echo "--- OpenAI: Non-streaming ---"
-curl -s "$RELAY_URL/v1/openai/v1/chat/completions" \
-  -X POST \
-  -H "Authorization: Bearer $JWT" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Say hello in exactly 3 words."}],
-    "max_tokens": 20
-  }' | jq '{model: .model, content: .choices[0].message.content, usage: .usage}'
-echo ""
-
-# 4. OpenAI streaming
-echo "--- OpenAI: Streaming ---"
-curl -s -N "$RELAY_URL/v1/openai/v1/chat/completions" \
-  -X POST \
-  -H "Authorization: Bearer $JWT" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Say hi in 2 words."}],
-    "max_tokens": 10,
-    "stream": true,
-    "stream_options": {"include_usage": true}
-  }' 2>/dev/null | head -20
-echo ""
-echo ""
-
-# 5. Anthropic passthrough
-echo "--- Anthropic: Non-streaming ---"
-curl -s "$RELAY_URL/v1/anthropic/v1/messages" \
-  -X POST \
-  -H "Authorization: Bearer $JWT" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-haiku-4-5",
-    "max_tokens": 20,
-    "messages": [{"role": "user", "content": "Say hello in exactly 3 words."}]
-  }' | jq '{model: .model, content: .content[0].text, usage: .usage}'
-echo ""
-
-# 6. Google Gemini passthrough
 echo "--- Google Gemini: Non-streaming ---"
-curl -s "$RELAY_URL/v1/google/v1beta/models/gemini-2.0-flash:generateContent" \
+curl -s "$RELAY_URL/v1/google/v1beta/models/gemini-3.8-flash:generateContent" \
   -X POST \
   -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/json" \
@@ -143,57 +101,27 @@ curl -s "$RELAY_URL/v1/google/v1beta/models/gemini-2.0-flash:generateContent" \
   }' | jq '{text: .candidates[0].content.parts[0].text, usage: .usageMetadata}'
 echo ""
 
-# 7. Tool call test (OpenAI)
-echo "--- OpenAI: Tool Call Passthrough ---"
-curl -s "$RELAY_URL/v1/openai/v1/chat/completions" \
+# 4. Google Gemini streaming
+echo "--- Google Gemini: Streaming ---"
+curl -s -N "$RELAY_URL/v1/google/v1beta/models/gemini-3.5-flash-lite:streamGenerateContent?alt=sse" \
   -X POST \
   -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
-    "tools": [{
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get the current weather",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "location": {"type": "string"}
-          },
-          "required": ["location"]
-        }
-      }
-    }],
-    "tool_choice": "auto",
-    "max_tokens": 100
-  }' | jq '{model: .model, tool_calls: .choices[0].message.tool_calls, usage: .usage}'
+    "contents": [{"parts": [{"text": "Say hi in 2 words."}]}]
+  }' 2>/dev/null | head -20
+echo ""
 echo ""
 
-# 8. Tool call test (Anthropic)
-echo "--- Anthropic: Tool Call Passthrough ---"
-curl -s "$RELAY_URL/v1/anthropic/v1/messages" \
+# 5. A model Dassi does not offer is refused before reaching the provider
+echo "--- Google Gemini: Unserved model (expect 403) ---"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$RELAY_URL/v1/google/v1beta/models/gemini-2.5-pro:generateContent" \
   -X POST \
   -H "Authorization: Bearer $JWT" \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-haiku-4-5",
-    "max_tokens": 100,
-    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
-    "tools": [{
-      "name": "get_weather",
-      "description": "Get the current weather",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "location": {"type": "string"}
-        },
-        "required": ["location"]
-      }
-    }],
-    "tool_choice": {"type": "auto"}
-  }' | jq '{model: .model, content: .content, usage: .usage}'
+  -d '{"contents": [{"parts": [{"text": "hi"}]}]}')
+echo "Status: $HTTP_CODE"
+[ "$HTTP_CODE" = "403" ] && echo "PASS" || echo "FAIL"
 echo ""
 
 echo "=== Done ==="

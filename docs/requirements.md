@@ -53,7 +53,7 @@ Build a **self-hosted, thin proxy** that:
 ### Key Principle: NO Format Translation
 
 The proxy does **NOT** convert between API formats. Your application produces the correct request format for each provider. The proxy is a **dumb pipe** that:
-- Reads the target provider from the request path (e.g., `/v1/google/...`, `/v1/anthropic/...`, `/v1/openai/...`)
+- Reads the target provider from the request path (e.g., `/v1/google/...`, `/v1/deepseek/...`)
 - Forwards the request body + headers **unchanged** to the provider
 - Streams the response back **unchanged**
 - Asynchronously logs token usage after the response completes
@@ -64,9 +64,10 @@ The proxy does **NOT** convert between API formats. Your application produces th
 
 | Route Pattern | Upstream Target | Auth Method |
 |---|---|---|
-| `POST /v1/google/*` | `https://generativelanguage.googleapis.com/*` | Server-side Google API key |
-| `POST /v1/anthropic/*` | `https://api.anthropic.com/*` | Server-side Anthropic API key |
-| `POST /v1/openai/*` | `https://api.openai.com/*` | Server-side OpenAI API key |
+| `POST /v1/google/v1beta/models/<served model>:(stream)GenerateContent` | `https://generativelanguage.googleapis.com/*` | Server-side Google API key |
+| `POST /v1/deepseek/*` (paid subscriptions only) | `https://api.deepseek.com/*` | Server-side DeepSeek API key |
+
+- Only the models Dassi offers on managed credit are served (`src/proxy/served-models.ts`); any other Google model or endpoint is rejected with 403. OpenAI and Anthropic routes were removed: their request bodies name the model, and the proxy never reads request bodies.
 
 - The proxy replaces the client's `Authorization` header with the server-side provider API key
 - All other headers and the request body are forwarded **as-is**
