@@ -42,18 +42,18 @@ echo ""
 
 # --- Auth: missing token ---
 echo "2. Auth: missing token"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/v1/openai/v1/chat/completions" \
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/v1/google/v1beta/models/gemini-3.8-flash:streamGenerateContent" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}')
+  -d '{"contents":[{"parts":[{"text":"hi"}]}]}')
 check "No auth header returns 401" "401" "$HTTP_CODE"
 echo ""
 
 # --- Auth: invalid JWT ---
 echo "3. Auth: invalid JWT"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/v1/openai/v1/chat/completions" \
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/v1/google/v1beta/models/gemini-3.8-flash:streamGenerateContent" \
   -H "Authorization: Bearer not-a-valid-jwt" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}')
+  -d '{"contents":[{"parts":[{"text":"hi"}]}]}')
 check "Invalid JWT returns 401" "401" "$HTTP_CODE"
 echo ""
 
@@ -119,10 +119,10 @@ echo ""
 # --- Proxy with JWT (if provided) ---
 if [ -n "$JWT" ]; then
   echo "11. Proxy: JWT auth + budget"
-  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/v1/anthropic/v1/messages" \
+  HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/v1/google/v1beta/models/gemini-3.8-flash:streamGenerateContent" \
     -H "Authorization: Bearer $JWT" \
     -H "Content-Type: application/json" \
-    -d '{"model":"claude-haiku-4-5","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}')
+    -d '{"contents":[{"parts":[{"text":"hi"}]}]}')
   # 200 = success, 401 = provider dummy key, 402 = no budget, 403 = no budget record, 502 = upstream error
   echo "  HTTP $HTTP_CODE"
   if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "502" ]; then

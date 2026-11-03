@@ -39,10 +39,10 @@ sig=$(printf '%s' "$hdr.$pl" | openssl dgst -sha256 -hmac "$SECRET" -binary | b6
 tok="$hdr.$pl.$sig"
 
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
-  "$URL/v1/openai/v1/chat/completions" \
+  "$URL/v1/google/v1beta/models/gemini-3.8-flash:streamGenerateContent" \
   -H "Authorization: Bearer $tok" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o","messages":[]}') || {
+  -d '{"contents":[]}') || {
     echo "PROBE ERROR: could not reach $URL (curl failed)"
     exit 2
   }
