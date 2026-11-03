@@ -128,26 +128,132 @@ bindings after the experiment, and delete the test VM.
 All three bindings must be valid. Expired, nearly expired (60 seconds), incomplete, or
 invalid Cloud configuration returns 503 before account admission. It never silently
 falls back to AI Studio. With all three absent, the original `GOOGLE_API_KEY` route
-remains available. Production requires automatic credential renewal and a sustained
-deployed test; this manually provisioned token is deliberately evaluation-only.
+remains available. The Paid sustained evaluation below passed regional compatibility;
+production still requires automatic credential renewal and validation of that renewal
+path. This manually provisioned token is deliberately evaluation-only.
 
 The usage observer includes `thoughtsTokenCount` in billable Google output alongside
 `candidatesTokenCount`, using the final cumulative snapshot once. Both Gemini APIs
 report those counts separately; Google bills thinking tokens. See
 [Google thinking pricing](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking#pricing).
 
-### Follow-up checks — 2026-10-28 UTC
+## Paid sustained retest — 2026-11-03 UTC
 
-The Cloudflare dashboard confirmed this account is on Workers Free, establishing the
+The Paid upgrade is verified. Worker version
+`babd55fa-975c-483e-b719-5a03eedb41e2` ran commit `5decdb9` with an API-verified
+1,000 ms CPU limit and Google Cloud's global Gemini endpoint. DeepSeek remained on
+`api.deepseek.com`. The current production relay image stayed at `ac52636` throughout.
+The candidate and production deployments were unchanged during measurement.
+
+DigitalOcean `sgp1` ran 06:50:01–07:10:01 UTC, and Google Cloud `asia-east2-b` ran
+06:50:04–07:10:04 UTC: **1,200 seconds each**, with 356 and 358 measured requests.
+Both used Node 22.23.4, Undici 6.29.1, six excluded successful warmups, all three
+workloads and alternating endpoint order. All 357 request pairs had identical
+request-body hashes. There were no automatic retries or early stops. Gemini's
+comparison includes a provider-platform change: current uses AI Studio, edge uses
+Google Cloud global. It does not isolate Cloudflare's contribution to latency.
+
+Successful-request first-answer p50/p95, in milliseconds, use nearest-rank
+percentiles. Failed requests are retained separately and excluded from latency.
+
+| Location | Model | Current p50 / p95 | Edge p50 / p95 | Current failures | Edge failures |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Singapore | Gemini 3.8 Flash | 2,380 / 9,958 | 2,003 / 10,620 | 1/58 | 2/58 |
+| Singapore | Gemini 3.5 Flash-Lite | 740 / 937 | 855 / 1,118 | 0/60 | 1/60 |
+| Singapore | DeepSeek Flash | 1,060 / 1,414 | 834 / 1,320 | 1/60 | 1/60 |
+| Hong Kong | Gemini 3.8 Flash | 2,020 / 10,327 | 1,873 / 10,828 | 0/59 | 0/59 |
+| Hong Kong | Gemini 3.5 Flash-Lite | 684 / 860 | 811 / 950 | 0/60 | 0/60 |
+| Hong Kong | DeepSeek Flash | 989 / 1,210 | 753 / 1,084 | 0/60 | 0/60 |
+
+DeepSeek's median within-pair savings were **158 ms (14.9%) in Singapore** and
+**236 ms (23.7%) in Hong Kong**, winning 47/59 and 49/60 successful pairs. Savings
+were positive for all three workloads and in eight of ten Singapore two-minute
+windows and all ten Hong Kong windows. This supports a sustained latency gain on
+these two tested networks, especially Hong Kong's failure-free run.
+
+Gemini Flash's median paired gains were 420 ms and 223 ms, but it won only 35/55
+and 33/59 pairs. Longer-context requests were slower by paired medians of 530 ms
+and 1,242 ms; first-answer p95 also increased. Flash-Lite lost 94 ms and 160 ms by
+paired medians and was slower in all three workloads and all ten windows in each
+region. These results do not support a blanket Gemini speed claim or cutover.
+
+Successful completion p50/p95 were:
+
+| Location / model | Current completion | Edge completion |
+| --- | ---: | ---: |
+| Singapore / Flash | 6,107 / 13,660 ms | 5,935 / 15,428 ms |
+| Singapore / Flash-Lite | 1,051 / 2,490 ms | 1,288 / 3,344 ms |
+| Singapore / DeepSeek | 1,472 / 6,029 ms | 1,347 / 5,334 ms |
+| Hong Kong / Flash | 6,524 / 12,735 ms | 5,574 / 12,813 ms |
+| Hong Kong / Flash-Lite | 1,015 / 2,599 ms | 1,222 / 3,439 ms |
+| Hong Kong / DeepSeek | 1,365 / 5,346 ms | 1,148 / 5,597 ms |
+
+**No Gemini regional rejections or Cloudflare CPU-limit failures occurred.** All
+354 measured edge requests with client-captured IDs matched Worker outcome `ok`.
+A late CPU sample covering 113 of those requests peaked at 257 ms, below the new
+1,000 ms limit but above Free's 10 ms limit. The three missing edge IDs were
+Singapore resets before response headers; their Worker outcome cannot be matched.
+
+Singapore recorded six `ECONNRESET` failures between 11:40 and 13:14: four edge,
+two current. Five arrived before headers; the sixth was a DeepSeek edge request
+after one metadata chunk but before answer text. Its matched Worker outcome was
+`ok`, with no exception. No unmatched admissions appeared in the captured measured
+window. The VM network-service journal contained no restart entries in that interval.
+The reset cause remains unconfirmed; this is not the earlier matched `exceededCpu`
+failure. Hong Kong completed all 358 measured requests successfully.
+
+Routing changed during the Singapore session. Later edge request metadata directly
+confirmed 38 requests at `MRS` and 18 at `CDG`, matching their response CF-Ray suffixes;
+57 contemporaneous Hong Kong requests confirmed `HKG`. Earlier Singapore response
+suffixes included `SIN` and `NRT` on edge, and `SIN`, `HKG` and `NRT` on current;
+some current sockets also later reported `MRS`/`CDG`. Do not infer guaranteed local
+ingress from the client's VM region. The temporal overlap with the resets does not
+establish a cause. Admission p50/p95 were 114/326 ms for Singapore and 83/99 ms for
+Hong Kong across matched edge requests.
+
+Persistent connections were exercised for the full session: Singapore reused sockets
+for 176/178 current and 174/178 edge requests; Hong Kong reused all 179/179 requests
+on each endpoint, with sockets spanning about 20 minutes. No measured answer-event
+gap reached two seconds. Every successful response ended with provider `STOP`/`stop`;
+none was token-limit truncated. These are repeated streaming requests on persistent
+HTTP/1.1 sessions, not one continuous 20-minute model response or browser HTTP/2/3.
+
+The deployed gateway first passed all **18 live functional scenarios**. Their 18
+observations settled as 15 completed charges and three uncharged interruptions.
+For the sustained tests, **360 identifiable edge requests**, including six warmups,
+settled with exactly one charge each, correct provider token counts for successful
+calls, and a matching account balance. The DeepSeek client-reset request completed
+at the provider and was charged once ($0.000591); client failure does not imply the
+provider stopped generating. Three pre-header edge resets had no captured ID and
+could not be checked individually. The 12 nonlive benchmark tests passed; the code
+revision's existing CI passed 237 unit tests, 39 workerd tests, SQL integration,
+typecheck, lint and builds.
+
+Both temporary VMs and the Hong Kong disk were removed after collecting results.
+The staging deployment was restored to CPU-only version
+`ffb80c03-9504-4965-bd84-6548fb3d3693`; its 1,000 ms limit and absence of all temporary
+Google Cloud bindings were verified. Thus the tested global Gemini route is **not
+left enabled with an expiring token**: staging now uses the existing AI Studio key.
+No permanent Google key or IAM grant was created. Production is unchanged. Automatic
+Google credential renewal, the remaining reset/routing behavior, and the staging
+policy window remain unresolved before customer cutover. These overlapping runs used
+one test account and two cloud networks; they do not establish mainland or all-user
+performance. Raw measurements, sanitized evidence and the time-series chart remain
+in ignored `.cache/paid-*` artifacts, separate from the October baseline.
+
+### Historical follow-up checks — 2026-10-28 UTC
+
+The Cloudflare dashboard confirmed this account was on Workers Free, establishing the
 10 ms effective CPU limit behind the matched Hong Kong `exceededCpu` failures.
-The 1,000 ms configuration is prepared; a Paid-plan upgrade is still pending.
+At that time the 1,000 ms configuration was prepared and the Paid upgrade was pending;
+the November retest above supersedes this deployment status.
 
 Direct Google Cloud API checks from a temporary GCP VM in Hong Kong passed all 12
 scenarios across `gemini-3.8-flash` and `gemini-3.5-flash-lite`: Chinese streaming,
 tool call, tool-result follow-up, image input, cancellation, and a subsequent request.
 Both models also passed a non-streaming preflight. These are functional checks, not
-a sustained speed result or proof of Cloudflare-to-provider behavior. The previous
-20-minute results below remain the latest completed deployed comparison.
+a sustained speed result or proof of Cloudflare-to-provider behavior. The October
+20-minute results below were the latest completed deployed comparison at that time.
 
 The updated local workerd relay also passed all 18 real-provider scenarios across the
 two Gemini models and DeepSeek. All 18 observations settled in the isolated staging
