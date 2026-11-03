@@ -215,16 +215,9 @@ describe('parseUsageFromBody', () => {
     });
   });
 
-  it('handles missing usage gracefully', () => {
-    const body = JSON.stringify({ model: 'gpt-5.4', choices: [] });
-    const usage = parseUsageFromBody(body, 'openai');
-    expect(usage).toEqual({
-      model: 'gpt-5.4',
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedInputTokens: 0,
-      cacheCreationTokens: 0,
-    });
+  it('distinguishes missing usage from a zero-token response', () => {
+    expect(parseUsageFromBody(JSON.stringify({model: 'gpt-5.4'}), 'openai')).toBeNull();
+    expect(parseUsageFromBody(JSON.stringify({model: 'gpt-5.4', usage: {prompt_tokens: 0, completion_tokens: 0}}), 'openai')?.inputTokens).toBe(0);
   });
 
   it('handles invalid JSON gracefully', () => {
@@ -310,7 +303,7 @@ describe('parseUsageFromSSE — cache token extraction', () => {
       'data: {"model":"gpt-4.1","choices":[{"delta":{"content":"Hi"}}]}',
       'data: {"usage":{"prompt_tokens":2006,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":1920}}}',
       'data: [DONE]',
-    ].join('\n');
+    ].join('\n\n');
 
     const usage = parseUsageFromSSE(sse, 'openai');
     expect(usage).toEqual({
@@ -327,7 +320,7 @@ describe('parseUsageFromSSE — cache token extraction', () => {
       'data: {"type":"message_start","message":{"model":"claude-opus-4-6","usage":{"input_tokens":500,"cache_read_input_tokens":4000,"cache_creation_input_tokens":100,"output_tokens":1}}}',
       'data: {"type":"content_block_delta","delta":{"text":"Hello"}}',
       'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}',
-    ].join('\n');
+    ].join('\n\n');
 
     const usage = parseUsageFromSSE(sse, 'anthropic');
     expect(usage).toEqual({
@@ -343,7 +336,7 @@ describe('parseUsageFromSSE — cache token extraction', () => {
   it('extracts Google cachedContentTokenCount from SSE chunk', () => {
     const sse = [
       'data: {"candidates":[{"content":{"parts":[{"text":"Hi"}]}}],"usageMetadata":{"promptTokenCount":150000,"candidatesTokenCount":200,"cachedContentTokenCount":140000},"modelVersion":"gemini-3.1-pro-preview"}',
-    ].join('\n');
+    ].join('\n\n');
 
     const usage = parseUsageFromSSE(sse, 'google');
     expect(usage).toEqual({
@@ -420,7 +413,7 @@ describe('OpenAI Responses API usage shape', () => {
       'event: response.completed',
       'data: {"type":"response.completed","response":{"id":"resp_1","model":"o1-pro","usage":{"input_tokens":900,"output_tokens":120,"input_tokens_details":{"cached_tokens":100}}}}',
       '',
-    ].join('\n');
+    ].join('\n\n');
     expect(parseUsageFromSSE(sse, 'openai')).toEqual({
       model: 'o1-pro',
       inputTokens: 900,
