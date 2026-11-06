@@ -281,3 +281,44 @@ describe('adminApp handlers', () => {
     });
   });
 });
+
+describe('paid cycle reset endpoint', () => {
+  const app = buildTestApp();
+  const post = (body: unknown) =>
+    app.request('/admin/users/user-42/budget/reset', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-secret-123',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  it.each([true, false])(
+    'acknowledges a reset or replay without losing its receipt (%s)',
+    async (applied) => {
+      vi.mocked(setUserBudget).mockResolvedValueOnce(applied);
+      const response = await post({ budget: 35, idempotency_key: 'in_paid' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        user_id: 'user-42',
+        applied,
+        idempotency_key: 'in_paid',
+      });
+      expect(setUserBudget).toHaveBeenCalledWith('user-42', 35, true, 'in_paid');
+    },
+  );
+  it.each([
+    { budget: -1, idempotency_key: 'in_paid' },
+    { budget: 35 },
+    { budget: 35, idempotency_key: ' ' },
+    { budget: 35, idempotency_key: 'x'.repeat(256) },
+  ])('rejects an invalid reset before the ledger is touched (%j)', async (body) => {
+    vi.mocked(setUserBudget).mockClear();
+    expect((await post(body)).status).toBe(400);
+    expect(setUserBudget).not.toHaveBeenCalled();
+  });
+  it('returns a retriable failure when the atomic ledger transaction fails', async () => {
+    vi.mocked(setUserBudget).mockRejectedValueOnce(new Error('db failed'));
+    expect((await post({ budget: 35, idempotency_key: 'in_paid' })).status).toBe(500);
+  });
+});

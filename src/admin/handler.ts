@@ -54,6 +54,36 @@ adminApp.put('/users/:user_id/budget', async (c) => {
 });
 
 /**
+ * POST /users/:user_id/budget/reset — Apply a paid cycle reset exactly once.
+ * The receipt commits in the same transaction as the budget and purchase ledger.
+ * A replay preserves both the current allowance and usage accumulated since it.
+ */
+adminApp.post('/users/:user_id/budget/reset', async (c) => {
+  let body: { budget?: unknown; idempotency_key?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  if (typeof body.budget !== 'number' || !Number.isFinite(body.budget) || body.budget < 0) {
+    return c.json({ error: 'Invalid budget: must be a non-negative number' }, 400);
+  }
+  const key = body.idempotency_key;
+  if (typeof key !== 'string' || key.trim().length === 0 || key.length > 255) {
+    return c.json({ error: 'Invalid idempotency_key' }, 400);
+  }
+  const userId = c.req.param('user_id');
+  try {
+    const applied = await setUserBudget(userId, body.budget, true, key);
+    if (applied) revokeUser(userId);
+    return c.json({ user_id: userId, applied, idempotency_key: key });
+  } catch {
+    console.error(`[Relay] Failed to reset budget for user ${userId}`);
+    return c.json({ error: 'Failed to reset budget' }, 500);
+  }
+});
+
+/**
  * POST /users/:user_id/budget/increment — Add purchased credit to a user's budget.
  * Request body: { delta_cents: number, idempotency_key: string }
  * Response: 200 { user_id, applied, budget, spend }
