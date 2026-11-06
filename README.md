@@ -403,3 +403,15 @@ Relay requests `Accept-Encoding: identity` from providers. Browser clients can a
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+
+Paid-cycle resets use `POST /admin/users/:id/budget/reset` with
+`{ budget, idempotency_key }`. Relay records the receipt in the same transaction
+as its plan base, purchased-credit draw-down and spend reset. A replay returns
+`applied: false` and preserves the current plan and accumulated usage. The
+existing absolute budget and purchase endpoints keep their contract.
+
+For the unpublished pricing/payment change, apply the additive
+`budget_reset_receipts` section of `docs/schema.sql`, then deploy this Relay
+endpoint **before** the Dassi webhook starts using it. The table has RLS and no
+client write grants. Neither this branch nor its schema has been deployed.

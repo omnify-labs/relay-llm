@@ -127,6 +127,21 @@ describe('setUserBudget (plan_base is the base of record; a locked transaction r
     expect(write.values).toEqual(['u1', 'u1', 'u1', 50, 50]);
   });
 
+  it('claims an invoice in the same locked transaction as its plan/purchase reset', async () => {
+    txResults = [[], [{ plan_base: '50' }], [{ idempotency_key: 'in_paid' }], [{ user_id: 'u1' }]];
+    expect(await setUserBudget('u1', 35, true, 'in_paid')).toBe(true);
+    expect(reconstructSql(txCalls[1]).sql).toContain('FOR UPDATE');
+    expect(reconstructSql(txCalls[2]).values).toEqual(['u1', 'in_paid']);
+    expect(reconstructSql(txCalls[3]).sql).toContain('spend = 0');
+  });
+
+  it('a replay never rewrites the current plan, purchase ledger or accumulated spend', async () => {
+    txResults = [[], [{ plan_base: '75' }], []];
+    expect(await setUserBudget('u1', 35, true, 'in_paid')).toBe(false);
+    expect(txCalls).toHaveLength(3);
+    expect(txCalls.map((call) => reconstructSql(call).sql).join(' ')).not.toContain('spend = 0');
+  });
+
   it('never derives the base from the mutable budget column (the concurrency bug this replaced)', async () => {
     txResults = [[], [{ plan_base: '50', spend: '62' }], [{ user_id: 'u1' }]];
     await setUserBudget('u1', 50, true);

@@ -215,3 +215,28 @@ UPDATE user_budgets ub
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS billing_account_id TEXT;
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_usage_logs_billing_account
   ON usage_logs(billing_account_id, created_at DESC) WHERE billing_account_id IS NOT NULL;
+
+
+-- Paid cycle reset receipts (2026-11-06). Deploy this additive table and the
+-- reset endpoint before switching the billing webhook to POST /budget/reset.
+-- Kept independently of the current budget row so delete/reprovision cannot
+-- make an old paid invoice reset a later account balance again.
+CREATE TABLE IF NOT EXISTS budget_reset_receipts (
+  user_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 255),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, idempotency_key)
+);
+ALTER TABLE budget_reset_receipts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON budget_reset_receipts FROM PUBLIC;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    REVOKE ALL ON budget_reset_receipts FROM authenticated;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    REVOKE ALL ON budget_reset_receipts FROM anon;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT SELECT ON budget_reset_receipts TO service_role;
+  END IF;
+END $$;

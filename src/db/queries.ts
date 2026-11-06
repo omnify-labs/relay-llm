@@ -155,12 +155,14 @@ export async function recordUsage(record: UsageLogInsert): Promise<RecordUsageOu
  * @param userId - User ID
  * @param budget - Plan base in USD (purchased credit is added on top)
  * @param resetSpend - Start a new cycle: draw down purchases by the over-base spend, zero spend
- * @returns True if the record was created or updated
+ * @param resetKey - Optional receipt key; replay skips the plan/spend write atomically
+ * @returns True if applied, false for an acknowledged reset replay
  */
 export async function setUserBudget(
   userId: string,
   budget: number,
   resetSpend: boolean,
+  resetKey?: string,
 ): Promise<boolean> {
   const sql = getDb();
   // A transaction, not a single statement: we lock the row FIRST (FOR UPDATE, its own
@@ -175,6 +177,18 @@ export async function setUserBudget(
     // the FOR UPDATE below actually serializes a concurrent increment.
     await tx`INSERT INTO user_budgets (user_id) VALUES (${userId}) ON CONFLICT (user_id) DO NOTHING`;
     await tx`SELECT plan_base FROM user_budgets WHERE user_id = ${userId} FOR UPDATE`;
+    if (resetKey !== undefined) {
+      if (!resetSpend) throw new Error('A reset key requires a cycle reset');
+      // Claim and reset share this transaction. A retry after a lost HTTP reply
+      // sees the committed receipt and cannot erase any newly accumulated usage.
+      const claimed = await tx`
+        INSERT INTO budget_reset_receipts (user_id, idempotency_key)
+        VALUES (${userId}, ${resetKey})
+        ON CONFLICT (user_id, idempotency_key) DO NOTHING
+        RETURNING idempotency_key
+      `;
+      if (claimed.length === 0) return false;
+    }
     if (resetSpend) {
       // Draw the spend that exceeded the CURRENT plan base down from purchases FIFO
       // (flooring in the user's favour), then start a fresh cycle. plan_base comes from
