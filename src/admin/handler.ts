@@ -65,7 +65,7 @@ adminApp.post('/users/:user_id/budget/reset', async (c) => {
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
-  if (typeof body.budget !== 'number' || !Number.isFinite(body.budget) || body.budget < 0) {
+  if (!body || typeof body.budget !== 'number' || !Number.isFinite(body.budget) || body.budget < 0) {
     return c.json({ error: 'Invalid budget: must be a non-negative number' }, 400);
   }
   const key = body.idempotency_key;

@@ -308,6 +308,7 @@ describe('paid cycle reset endpoint', () => {
     },
   );
   it.each([
+    null,
     { budget: -1, idempotency_key: 'in_paid' },
     { budget: 35 },
     { budget: 35, idempotency_key: ' ' },
