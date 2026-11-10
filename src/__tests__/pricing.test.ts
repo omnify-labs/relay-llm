@@ -21,6 +21,45 @@ const io = (m: string, inTok: number, outTok: number) =>
   (inTok / 1e6) * PRICING[m].inputPerMillion + (outTok / 1e6) * PRICING[m].outputPerMillion;
 
 describe('calculateCost', () => {
+  it('prices Argon cache-heavy and long-context calls at Google rates', () => {
+    expect(resolveServedPricing('gemini-4-argon')).toMatchObject({
+      inputMicro: 2_000_000n,
+      outputMicro: 10_000_000n,
+      cachedInputMicro: 100_000n,
+    });
+    expect(calculateCostMicroUsd('gemini-4-argon', 100_000, 1_000, 90_000, 0)).toBe(39_000n);
+    expect(calculateCostMicroUsd('gemini-4-argon', 1_000_000, 10_000, 900_000, 0)).toBe(390_000n);
+    expect(calculateCostMicroUsd('gemini-4-argon', 0, 0, 0, 0)).toBe(0n);
+  });
+
+  it('prices the Flash Lite response version like its canonical model', () => {
+    for (const model of ['gemini-3.1-flash-lite', '3.1-flash-lite-05-2026']) {
+      expect(resolveServedPricing(model)).toMatchObject({
+        inputMicro: 250_000n,
+        outputMicro: 1_500_000n,
+        cachedInputMicro: 25_000n,
+      });
+      expect(calculateCostMicroUsd(model, 100_000, 1_000, 90_000, 0)).toBe(6_250n);
+    }
+  });
+
+  it('does not debit credits for free Google-hosted Gemma calls', () => {
+    expect(resolveServedPricing('gemma-4-31b-it')).toMatchObject({
+      inputMicro: 0n,
+      outputMicro: 0n,
+      cachedInputMicro: 0n,
+      cacheCreationMicro: 0n,
+    });
+    expect(calculateCostMicroUsd('gemma-4-31b-it', 1_000_000, 100_000, 900_000, 0)).toBe(0n);
+  });
+
+  it('keeps unrecognized Google model IDs on the conservative fallback', () => {
+    expect(resolveServedPricing('gemini-4-argon-typo')).toBeUndefined();
+    expect(calculateCostMicroUsd('gemini-4-argon-typo', 100_000, 1_000, 90_000, 0))
+      .toBeGreaterThan(calculateCostMicroUsd('gemini-4-argon', 100_000, 1_000, 90_000, 0));
+    expect(calculateCostMicroUsd('gemma-4-31b-it-typo', 1_000, 1_000, 0, 0)).toBeGreaterThan(0n);
+  });
+
   it('floors DeepSeek cached and reasoning usage once on the integer billing path', () => {
     expect(calculateCostMicroUsd('deepseek-flash', 1000, 100, 700, 0)).toBe(574n);
     expect(calculateCostMicroUsd('deepseek-flash', 0, 0, 0, 0)).toBe(0n);

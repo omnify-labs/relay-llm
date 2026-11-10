@@ -51,7 +51,11 @@ describe('litellm-pricing', () => {
     expect(missingServedModels()).toEqual([]);
     for (const m of SERVED_MODELS) {
       expect(PRICING[m]).toBeDefined();
-      expect(PRICING[m].inputPerMillion).toBeGreaterThan(0);
+      if (m === 'gemma-4-31b-it') {
+        expect(PRICING[m].inputPerMillion).toBe(0);
+      } else {
+        expect(PRICING[m].inputPerMillion).toBeGreaterThan(0);
+      }
     }
   });
 

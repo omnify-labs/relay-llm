@@ -156,6 +156,14 @@ tariff: $1.50/M uncached input, $0.006/M cached input, $1.20/M output. Off-peak
 provider discounts are not passed through. The tariff is explicit in
 `src/billing/litellm-pricing.ts` and survives provider price-table syncs.
 
+Google response IDs `gemini-4-argon`, `3.1-flash-lite-05-2026`, and
+`gemma-4-31b-it` resolve through the aliases in the same pricing module. Argon
+uses the vendored Google rates, including its cached-input discount; Flash Lite
+uses the `gemini-3.1-flash-lite` entry; Google-hosted Gemma 4 is priced at zero.
+The Argon rates imported on 2026-11-10 are Google's promotional $2/M input,
+$10/M output and $0.10/M cached input through 2026-11-30; the daily pricing sync
+tracks later provider changes. See [Google's pricing](https://ai.google.dev/gemini-api/docs/pricing).
+
 Deploy Relay before the companion Dassi model-list function and extension.
 Verify a real authenticated streamed tool-call conversation and its usage log
 before customer activation.
