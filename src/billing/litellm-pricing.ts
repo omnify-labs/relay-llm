@@ -109,6 +109,10 @@ export const SERVED_MODELS: readonly string[] = [
   // input rate and orders of magnitude over the real cached rate on exactly the
   // long, heavily-cached browser sessions it is meant for.
   'gemini-3.8-flash',
+  'gemini-4-argon',
+  'gemini-3.1-flash-lite',
+  '3.1-flash-lite-05-2026',
+  'gemma-4-31b-it',
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   // 2026-08 lineup: gemini-3.5-flash-lite is the managed budget tier (dassi PR
@@ -162,6 +166,9 @@ export function proxiedEntries(): Array<[string, LiteLLMEntry]> {
 /** relay model id -> LiteLLM key, for the few that don't match exactly. */
 export const ALIASES: Record<string, string> = {
   'gemini-2.5-pro-preview': 'gemini-2.5-pro',
+  'gemini-4-argon': 'gemini/gemini-4-argon',
+  '3.1-flash-lite-05-2026': 'gemini-3.1-flash-lite',
+  'gemma-4-31b-it': 'gemini/gemma-4-31b-it',
 };
 
 function toMillion(perToken: number | undefined): number {

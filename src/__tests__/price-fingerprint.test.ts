@@ -20,6 +20,21 @@ const vendored = JSON.parse(readFileSync(VENDORED, 'utf8')) as Record<
 >;
 
 describe('servedFingerprint', () => {
+  it('tracks price changes on provider-prefixed Google entries and response aliases', () => {
+    const before = servedFingerprint(vendored);
+    for (const [model, key] of [
+      ['gemini-4-argon', 'gemini/gemini-4-argon'],
+      ['3.1-flash-lite-05-2026', 'gemini-3.1-flash-lite'],
+      ['gemma-4-31b-it', 'gemini/gemma-4-31b-it'],
+    ]) {
+      const bumped = { ...vendored, [key]: { ...vendored[key], input_cost_per_token: 9e-6 } };
+      const after = servedFingerprint(bumped);
+      expect(after).not.toBe(before);
+      expect(JSON.parse(after)[model].inputMicro).toBe('9000000');
+    }
+    expect(JSON.parse(before)['gemma-4-31b-it'].inputMicro).toBe('0');
+  });
+
   it('keeps the managed DeepSeek tariff fixed when upstream pricing changes', () => {
     const fingerprint = servedFingerprint(vendored);
     const parsed = JSON.parse(fingerprint);
@@ -67,8 +82,9 @@ describe('servedFingerprint', () => {
   });
 
   it('ignores price moves on models relay does not serve', () => {
+    const servedKeys = new Set(SERVED_MODELS.map((model) => ALIASES[model] ?? model));
     const unserved = Object.keys(vendored).find(
-      (m) => !SERVED_MODELS.includes(m) && vendored[m]?.input_cost_per_token != null,
+      (m) => !servedKeys.has(m) && vendored[m]?.input_cost_per_token != null,
     );
     expect(unserved, 'vendored table should contain unserved models').toBeTruthy();
     const noisy = {
