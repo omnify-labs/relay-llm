@@ -9,6 +9,7 @@ import { logger } from 'hono/logger';
 import { serve } from '@hono/node-server';
 import { proxyHandler } from './proxy/handler.js';
 import { authMiddleware } from './auth/jwt.js';
+import { modelAllowlistMiddleware } from './proxy/model-allowlist.js';
 import { adminAuthMiddleware } from './admin/middleware.js';
 import { adminApp } from './admin/handler.js';
 import { budgetMiddleware, paidModelMiddleware } from './billing/budget.js';
@@ -39,10 +40,10 @@ app.use('/v1/runs/*', authMiddleware);
 app.route('/', runRoutes);
 
 // LLM proxy routes — JWT auth + budget check + passthrough
-app.all('/v1/openai/*', authMiddleware, budgetMiddleware, proxyHandler('openai'));
-app.all('/v1/anthropic/*', authMiddleware, budgetMiddleware, proxyHandler('anthropic'));
-app.all('/v1/google/*', authMiddleware, budgetMiddleware, proxyHandler('google'));
-app.all('/v1/deepseek/*', authMiddleware, paidModelMiddleware, budgetMiddleware, proxyHandler('deepseek'));
+app.all('/v1/openai/*', authMiddleware, modelAllowlistMiddleware('openai'), budgetMiddleware, proxyHandler('openai'));
+app.all('/v1/anthropic/*', authMiddleware, modelAllowlistMiddleware('anthropic'), budgetMiddleware, proxyHandler('anthropic'));
+app.all('/v1/google/*', authMiddleware, modelAllowlistMiddleware('google'), budgetMiddleware, proxyHandler('google'));
+app.all('/v1/deepseek/*', authMiddleware, modelAllowlistMiddleware('deepseek'), paidModelMiddleware, budgetMiddleware, proxyHandler('deepseek'));
 
 // 404 for everything else
 app.notFound((c) => c.json({ error: 'Not found' }, 404));

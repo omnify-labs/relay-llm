@@ -241,6 +241,16 @@ PORT=8080
 RUN_ADMISSION_TTL_MS=1800000
 ```
 
+## Managed-model allowlist
+
+A relay JWT is an ordinary Dassi (Supabase) session token, so any signed-up account
+can call relay directly. Relay forwards only what Dassi's managed lineup calls:
+Google `models/{gemini-3.8-flash|gemini-3.5-flash-lite}:{generateContent|streamGenerateContent}`
+and the paid-only DeepSeek route. Every other model or endpoint, and all OpenAI and
+Anthropic routes, return 403 before budget admission. Adding a model to the Dassi
+lineup (`get-available-models`) requires adding it to `MANAGED_GOOGLE_MODELS` in
+`src/proxy/model-allowlist.ts` and deploying relay first.
+
 ## Budget enforcement is per-run
 
 Budget is gated **once per agent run**, not on every LLM call. A run is identified by
