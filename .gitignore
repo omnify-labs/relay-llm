@@ -9,3 +9,9 @@ coverage/
 .turbo/
 .worktrees/
 .claude/
+
+.wrangler/
+.cache/
+.dev.vars*
+wrangler.staging.json
+wrangler.local.json
