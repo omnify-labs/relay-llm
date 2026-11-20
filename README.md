@@ -475,5 +475,6 @@ to provider passthrough or Worker code are required.
 `pnpm test:redemption-database` uses `TEST_DATABASE_URL` on loopback only, creates
 its own database, tests actual locks and ledger writes, and drops that database.
 CI uses `self-host-digital-ocean` with a private Docker daemon and disposable
-PostgreSQL; fork PR jobs are excluded from the trusted runner. Grant this
+PostgreSQL; fork PR jobs are excluded from the trusted runner, and comment-triggered
+assistant jobs require an owner, member or collaborator. Grant this
 repository access to the runner group before expecting these jobs to start.
