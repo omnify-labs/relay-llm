@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import { setUserBudget, deleteUserBudget, incrementUserBudget } from '../db/queries.js';
 import { revokeUser } from '../billing/run-admission.js';
+import { RedemptionBudgetConflict } from '../db/redemption.js';
 
 export const adminApp = new Hono();
 
@@ -65,7 +66,12 @@ adminApp.post('/users/:user_id/budget/reset', async (c) => {
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
-  if (!body || typeof body.budget !== 'number' || !Number.isFinite(body.budget) || body.budget < 0) {
+  if (
+    !body ||
+    typeof body.budget !== 'number' ||
+    !Number.isFinite(body.budget) ||
+    body.budget < 0
+  ) {
     return c.json({ error: 'Invalid budget: must be a non-negative number' }, 400);
   }
   const key = body.idempotency_key;
@@ -80,6 +86,49 @@ adminApp.post('/users/:user_id/budget/reset', async (c) => {
   } catch {
     console.error(`[Relay] Failed to reset budget for user ${userId}`);
     return c.json({ error: 'Failed to reset budget' }, 500);
+  }
+});
+
+/** Apply a membership transition only while its card still permits it, inside the budget transaction. */
+adminApp.post('/users/:user_id/budget/redemption', async (c) => {
+  let body: { budget?: unknown; code_id?: unknown; phase?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON body' }, 400);
+  }
+  const userId = c.req.param('user_id').toLowerCase();
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  if (
+    !body ||
+    !uuid.test(userId) ||
+    typeof body.code_id !== 'string' ||
+    !uuid.test(body.code_id) ||
+    (body.phase !== 'activate' && body.phase !== 'end') ||
+    typeof body.budget !== 'number' ||
+    !Number.isFinite(body.budget) ||
+    (body.phase === 'end' ? body.budget !== 0 : body.budget <= 0)
+  ) {
+    return c.json({ error: 'Invalid redemption transition' }, 400);
+  }
+  const codeId = body.code_id.toLowerCase();
+  const key = `redemption_${body.phase === 'end' ? 'end_' : ''}${codeId}`;
+  try {
+    const result = await setUserBudget(userId, body.budget, true, key, {
+      codeId,
+      phase: body.phase,
+    });
+    if (result.applied) revokeUser(userId);
+    return c.json({
+      protocol: 'redemption.v1',
+      user_id: userId,
+      idempotency_key: key,
+      ...result,
+    });
+  } catch (error) {
+    if (error instanceof RedemptionBudgetConflict) return c.json({ error: error.message }, 409);
+    console.error(`[Relay] Failed guarded redemption budget transition for user ${userId}`);
+    return c.json({ error: 'Failed to reconcile redeemed budget' }, 500);
   }
 });
 
@@ -109,7 +158,12 @@ adminApp.post('/users/:user_id/budget/increment', async (c) => {
   }
   const key = body.idempotency_key;
   if (typeof key !== 'string' || key.length === 0 || key.length > 255) {
-    return c.json({ error: 'Invalid idempotency_key: must be a non-empty string (max 255)' }, 400);
+    return c.json(
+      {
+        error: 'Invalid idempotency_key: must be a non-empty string (max 255)',
+      },
+      400,
+    );
   }
 
   try {

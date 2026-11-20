@@ -450,3 +450,29 @@ For the unpublished pricing/payment change, apply the additive
 `budget_reset_receipts` section of `docs/schema.sql`, then deploy this Relay
 endpoint **before** the Dassi webhook starts using it. The table has RLS and no
 client write grants. Neither this branch nor its schema has been deployed.
+
+
+### Redeemed membership budget transitions
+
+`POST /admin/users/:user_id/budget/redemption` requires the existing admin bearer
+secret and `{budget, code_id, phase}`. `activate` accepts a positive plan base;
+`end` accepts zero. Relay verifies the claimed managed month card, owner and
+current period inside the same transaction as the existing purchased-credit
+ledger and cycle receipt. Account, card and budget locks precede a wall-clock
+eligibility check. A delayed activation after expiry/revocation returns 409
+without changing the allowance. Current replacement membership or funded
+subscription/workspace access protects its budget and accumulated spend during
+old-card cleanup. Responses identify `protocol: "redemption.v1"`, a canonical
+receipt key, `applied` and `protected`.
+
+This endpoint requires Dassi's `20261119000100_redemption_codes.sql` foundation;
+keep Dassi's `REDEMPTION_ENABLED` disabled until that migration and this endpoint
+are deployed. Older Relay versions return 404 on the new route before any write.
+The generic Stripe reset endpoint and purchase ledger remain shared. No changes
+to provider passthrough or Worker code are required.
+
+`pnpm test:redemption-database` uses `TEST_DATABASE_URL` on loopback only, creates
+its own database, tests actual locks and ledger writes, and drops that database.
+CI uses `self-host-digital-ocean` with a private Docker daemon and disposable
+PostgreSQL; fork PR jobs are excluded from the trusted runner. Grant this
+repository access to the runner group before expecting these jobs to start.
