@@ -25,9 +25,12 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-host-digital-ocean
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Start isolated Docker daemon
+        run: bash scripts/ci-docker.sh start
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -59,3 +62,7 @@ jobs:
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
             docker pull "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
             /srv/relay-llm/deploy.sh "ghcr.io/omnify-labs/relay-llm:${{ github.sha }}"
+
+      - name: Remove isolated Docker daemon
+        if: always() && env.CI_DOCKER_CONTAINER != ''
+        run: bash scripts/ci-docker.sh stop
