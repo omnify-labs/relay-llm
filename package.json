@@ -21,7 +21,8 @@
     "benchmark:relay": "node scripts/benchmark-relay.mjs",
     "benchmark:soak": "node scripts/benchmark-relay-soak.mjs",
     "dev:worker": "wrangler dev",
-    "deploy:worker": "wrangler deploy --config wrangler.staging.json"
+    "deploy:worker": "wrangler deploy --config wrangler.staging.json",
+    "test:redemption-database": "tsx scripts/test-redemption-database.ts"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",

@@ -127,6 +127,7 @@ docs/
   pnpm test               # unit tests (Vitest)
   pnpm test:worker        # actual workerd runtime, mocked external I/O
   pnpm test:database      # disposable local PostgreSQL integration tests
+  pnpm test:redemption-database # actual membership locks and budget ledger
   pnpm build:worker      # dry-run Worker bundle
   pnpm test:live          # explicit staging URL/credentials, real provider calls
   ```
@@ -134,6 +135,8 @@ docs/
 - Use `.env` for local development. Never commit secrets. Document required keys in `.env.example`.
 
 ## Testing & QA
+
+- CI for pull requests uses `self-host-digital-ocean`; never fall back to GitHub-hosted runners without explicit approval. Tests start a private Docker daemon and remove it at job completion. Fork PRs do not run on the trusted host.
 - **Always create unit tests for new features** (functions, modules, middleware).
 - **After updating any logic**, check whether existing unit tests need to be updated.
 - **Unit tests**: Place in `src/__tests__/` using Vitest. Co-locate integration tests in `scripts/`.

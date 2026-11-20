@@ -4,6 +4,12 @@
 
 import { getDb } from './client.js';
 import type postgres from 'postgres';
+import {
+  lockRedemption,
+  preserveRedemptionBudget,
+  type RedemptionBudgetGuard,
+  type RedemptionBudgetResult,
+} from './redemption.js';
 
 export interface UserBudget {
   spend: number;
@@ -159,14 +165,29 @@ export async function recordUsage(
  * @param budget - Plan base in USD (purchased credit is added on top)
  * @param resetSpend - Start a new cycle: draw down purchases by the over-base spend, zero spend
  * @param resetKey - Optional receipt key; replay skips the plan/spend write atomically
- * @returns True if applied, false for an acknowledged reset replay
+ * @param redemption - Optional membership guard, checked after acquiring ledger locks
+ * @returns Applied/replay boolean, or applied/protected receipt for a guarded transition
  */
 export async function setUserBudget(
   userId: string,
   budget: number,
   resetSpend: boolean,
+  resetKey: string,
+  redemption: RedemptionBudgetGuard,
+): Promise<RedemptionBudgetResult>;
+export async function setUserBudget(
+  userId: string,
+  budget: number,
+  resetSpend: boolean,
   resetKey?: string,
-): Promise<boolean> {
+): Promise<boolean>;
+export async function setUserBudget(
+  userId: string,
+  budget: number,
+  resetSpend: boolean,
+  resetKey?: string,
+  redemption?: RedemptionBudgetGuard,
+): Promise<boolean | RedemptionBudgetResult> {
   const sql = getDb();
   // A transaction, not a single statement: we lock the row FIRST (FOR UPDATE, its own
   // statement) so no concurrent budget/increment can commit between our read of the
@@ -174,12 +195,17 @@ export async function setUserBudget(
   // column `plan_base` and is read directly — NEVER derived from the mutable `budget`
   // — so the reset draw-down cannot be corrupted by a purchase that landed in the gap.
   return sql.begin(async (tx) => {
+    if (redemption) await lockRedemption(tx, userId, redemption);
     // Guarantee the row before locking: SELECT ... FOR UPDATE locks nothing when the
     // row does not exist yet, so a first-ever write (a purchase creating the row, or a
     // re-provision after DELETE) could still race. This insert makes the row exist so
     // the FOR UPDATE below actually serializes a concurrent increment.
     await tx`INSERT INTO user_budgets (user_id) VALUES (${userId}) ON CONFLICT (user_id) DO NOTHING`;
     await tx`SELECT plan_base FROM user_budgets WHERE user_id = ${userId} FOR UPDATE`;
+    if (redemption && (await preserveRedemptionBudget(tx, userId, redemption))) {
+      return { applied: false, protected: true };
+    }
+    const resultFor = (applied: boolean) => (redemption ? { applied, protected: false } : applied);
     if (resetKey !== undefined) {
       if (!resetSpend) throw new Error('A reset key requires a cycle reset');
       // Claim and reset share this transaction. A retry after a lost HTTP reply
@@ -190,7 +216,7 @@ export async function setUserBudget(
         ON CONFLICT (user_id, idempotency_key) DO NOTHING
         RETURNING idempotency_key
       `;
-      if (claimed.length === 0) return false;
+      if (claimed.length === 0) return resultFor(false);
     }
     if (resetSpend) {
       // Draw the spend that exceeded the CURRENT plan base down from purchases FIFO
@@ -226,7 +252,7 @@ export async function setUserBudget(
         )
         SELECT user_id FROM upsert
       `;
-      return result.length > 0;
+      return resultFor(result.length > 0);
     }
     const result = await tx`
       INSERT INTO user_budgets (user_id, plan_base, budget)
@@ -235,10 +261,9 @@ export async function setUserBudget(
       SET plan_base = EXCLUDED.plan_base, budget = EXCLUDED.budget, updated_at = NOW()
       RETURNING user_id
     `;
-    return result.length > 0;
+    return resultFor(result.length > 0);
   });
 }
-
 
 /** Post-increment ledger state, plus whether THIS call applied the delta. */
 export interface BudgetIncrementResult {
