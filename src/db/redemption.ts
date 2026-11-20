@@ -68,8 +68,5 @@ export async function preserveRedemptionBudget(
   ) {
     throw new RedemptionBudgetConflict();
   }
-  return (
-    guard.phase === 'end' &&
-    (state.replacement || ((state.subscribed || state.seated) && state.funded))
-  );
+  return guard.phase === 'end' && (state.replacement || (state.subscribed && state.funded));
 }

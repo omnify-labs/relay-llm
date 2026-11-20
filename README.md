@@ -461,8 +461,9 @@ current period inside the same transaction as the existing purchased-credit
 ledger and cycle receipt. Account, card and budget locks precede a wall-clock
 eligibility check. A delayed activation after expiry/revocation returns 409
 without changing the allowance. Current replacement membership or funded
-subscription/workspace access protects its budget and accumulated spend during
-old-card cleanup. Responses identify `protocol: "redemption.v1"`, a canonical
+personal subscription protects its budget and accumulated spend during
+old-card cleanup. Workspace membership blocks activation but does not retain an
+expired personal allowance; its separate pool is never mutated. Responses identify `protocol: "redemption.v1"`, a canonical
 receipt key, `applied` and `protected`.
 
 This endpoint requires Dassi's `20261119000100_redemption_codes.sql` foundation;

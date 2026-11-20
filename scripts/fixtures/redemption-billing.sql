@@ -9,9 +9,9 @@ CREATE TABLE subscriptions (
   user_id uuid, canceled_at timestamptz, status text, is_one_time boolean DEFAULT false,
   current_period_end timestamptz
 );
-CREATE TABLE test_seats (user_id uuid);
+CREATE TABLE test_seats (user_id uuid, workspace_id uuid);
 CREATE FUNCTION public.workspace_of(uuid) RETURNS TABLE (id uuid) LANGUAGE sql AS
-  $$ SELECT user_id FROM test_seats WHERE user_id = $1 $$;
+  $$ SELECT workspace_id FROM test_seats WHERE user_id = $1 $$;
 CREATE TABLE user_budgets (
   user_id text PRIMARY KEY, plan_base numeric NOT NULL DEFAULT 0,
   budget numeric NOT NULL DEFAULT 0, spend numeric NOT NULL DEFAULT 0,

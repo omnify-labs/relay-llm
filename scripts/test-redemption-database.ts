@@ -118,20 +118,29 @@ try {
     assert.deepEqual(await balance(), { plan_base: 50, budget: 50, spend: 19 });
   });
   await check(
-    'funded subscriptions and workspace seats survive stale cleanup and block activation',
+    'a funded personal subscription survives stale cleanup and blocks activation',
     async () => {
-      for (const source of ['subscription', 'workspace']) {
-        await sql`TRUNCATE subscriptions,test_seats`;
-        if (source === 'subscription')
-          await sql`INSERT INTO subscriptions(user_id,status) VALUES (${user},'active')`;
-        else await sql`INSERT INTO test_seats VALUES (${user})`;
-        await sql`UPDATE redemption_codes SET ends_at=now()+interval '1 day' WHERE id=${card}`;
-        await assert.rejects(transition('activate'), RedemptionBudgetConflict);
-        await sql`UPDATE user_budgets SET plan_base=100,budget=100,spend=33 WHERE user_id=${user}`;
-        await sql`UPDATE redemption_codes SET ends_at=now()-interval '1 second' WHERE id=${card}`;
-        assert.deepEqual(await transition('end'), { applied: false, protected: true });
-        assert.deepEqual(await balance(), { plan_base: 100, budget: 100, spend: 33 });
-      }
+      await sql`INSERT INTO subscriptions(user_id,status) VALUES (${user},'active')`;
+      await assert.rejects(transition('activate'), RedemptionBudgetConflict);
+      await sql`UPDATE user_budgets SET plan_base=100,budget=100,spend=33 WHERE user_id=${user}`;
+      await sql`UPDATE redemption_codes SET ends_at=now()-interval '1 second' WHERE id=${card}`;
+      assert.deepEqual(await transition('end'), { applied: false, protected: true });
+      assert.deepEqual(await balance(), { plan_base: 100, budget: 100, spend: 33 });
+    },
+  );
+  await check(
+    'joining a workspace blocks activation but cannot retain an expired personal allowance',
+    async () => {
+      await transition('activate');
+      await sql`INSERT INTO test_seats VALUES (${user},${other})`;
+      await sql`INSERT INTO user_budgets(user_id,plan_base,budget,spend) VALUES (${other},1000,1000,321)`;
+      await assert.rejects(transition('activate'), RedemptionBudgetConflict);
+      await sql`UPDATE redemption_codes SET ends_at=now()-interval '1 second' WHERE id=${card}`;
+      assert.deepEqual(await transition('end'), { applied: true, protected: false });
+      assert.deepEqual(await balance(), { plan_base: 0, budget: 0, spend: 0 });
+      const [pool] =
+        await sql`SELECT plan_base,budget,spend FROM user_budgets WHERE user_id=${other}`;
+      assert.deepEqual(pool, { plan_base: '1000', budget: '1000', spend: '321' });
     },
   );
   await check('an expired one-time subscription does not block the redeemed period', async () => {
