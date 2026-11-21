@@ -8,6 +8,7 @@ import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { serve } from '@hono/node-server';
 import { proxyHandler } from './proxy/handler.js';
+import { requestTiming, TIMING_EXPOSE_HEADERS } from './proxy/timing.js';
 import { authMiddleware } from './auth/jwt.js';
 import { modelAllowlistMiddleware } from './proxy/model-allowlist.js';
 import { adminAuthMiddleware } from './admin/middleware.js';
@@ -21,7 +22,8 @@ const env = loadEnv();
 const app = new Hono();
 
 // Global middleware
-app.use('*', cors());
+app.use('*', requestTiming('node'));
+app.use('*', cors({ origin: '*', exposeHeaders: TIMING_EXPOSE_HEADERS }));
 app.use('*', logger());
 
 // Health check (no auth)

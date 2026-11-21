@@ -1,5 +1,20 @@
 # RelayLLM
 
+Node and Worker responses expose `Server-Timing` metrics `relay_headers`
+(application ingress to response headers), `relay_pre_upstream` (ingress to provider
+dispatch) and `upstream_headers` (provider dispatch to provider headers). These are
+not first-token or full-generation timings. `x-relay-runtime`, `x-relay-country`
+and the existing `x-relay-request-id` are CORS-exposed; detailed browser resource
+timings are allowed via `Timing-Allow-Origin`. Country is Cloudflare request metadata
+(or `CF-IPCountry` behind the trusted Node ingress), with `unknown` on missing data.
+Cloudflare country/colo describes the observed network route, including VPNs.
+Headers return without consuming the provider stream. `/health` is uncached and
+never checks billing or calls a provider. Structured `relay_headers` logs carry
+the server request ID and a validated diagnostic `clientRequestId` when supplied.
+Existing billing `latency_ms` and token/cost accounting keep their original meaning.
+The Dassi extension reports the client side through its existing GA4 pipeline;
+see [the timing contract](https://github.com/omnify-labs/dassi/blob/main/docs/relay-latency.md).
+
 The Cloudflare edge MVP forwards managed Gemini and DeepSeek calls directly from a
 global Worker to each provider, preserving native request/response bytes.
 The staging prototype uses a durable account counter to remove the central billing
