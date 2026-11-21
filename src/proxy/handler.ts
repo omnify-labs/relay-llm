@@ -1,5 +1,6 @@
 /** Native provider passthrough shared by the Node server and edge Worker. */
 import type { Context, MiddlewareHandler } from 'hono';
+import { endUpstreamTiming, startUpstreamTiming } from './timing.js';
 import { PROVIDERS, type ProviderName } from './providers.js';
 import { logUsage, type UsageRecord } from '../billing/usage.js';
 import { parseUsageFromBody, SseUsageReader, type ParsedUsage } from './usage.js';
@@ -174,7 +175,9 @@ export function proxyHandler(
         signal,
         redirect: 'manual',
       };
+      startUpstreamTiming(c);
       const upstream = await fetch(url.toString(), init);
+      endUpstreamTiming(c);
       if (upstream.status >= 300 && upstream.status < 400) {
         void upstream.body?.cancel();
         return c.json({ error: 'Unexpected upstream redirect' }, 502);

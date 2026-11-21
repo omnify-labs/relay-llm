@@ -4,6 +4,7 @@ import { cors } from 'hono/cors';
 import type { Hyperdrive, Queue, MessageBatch, ExportedHandler } from '@cloudflare/workers-types';
 import { createAuthMiddleware } from '../auth/jwt.js';
 import { proxyHandler, type UsageObservation } from '../proxy/handler.js';
+import { requestTiming, TIMING_EXPOSE_HEADERS } from '../proxy/timing.js';
 import type { ProviderName } from '../proxy/providers.js';
 import * as database from './database.js';
 import { openAccount, type RoutingEnv } from './routing.js';
@@ -41,7 +42,8 @@ export function createWorkerApp(services: WorkerServices = { openAccount }) {
     Bindings: WorkerEnv;
     Variables: { userId: string };
   }>();
-  app.use('*', cors({ origin: '*', exposeHeaders: ['x-relay-request-id'] }));
+  app.use('*', requestTiming('cloudflare-worker'));
+  app.use('*', cors({ origin: '*', exposeHeaders: TIMING_EXPOSE_HEADERS }));
   app.get('/health', (c) => c.json({ status: 'ok', runtime: 'cloudflare-worker' }));
   app.use('/v1/*', async (c, next) => {
     if (!c.env.JWT_SECRET) return c.json({ error: 'Gateway is not configured' }, 503);

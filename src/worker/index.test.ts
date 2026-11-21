@@ -174,6 +174,10 @@ describe('actual Worker routes', () => {
       },
     });
     expect(result.response.headers.get('x-relay-request-id')).toBe(usages[0].requestId);
+    expect(result.response.headers.get('x-relay-runtime')).toBe('cloudflare-worker');
+    expect(result.response.headers.get('server-timing')).toContain('relay_pre_upstream;dur=');
+    expect(result.response.headers.get('server-timing')).toContain('upstream_headers;dur=');
+    expect(result.response.headers.get('access-control-expose-headers')).toContain('server-timing');
   });
   it('preserves Google query parameters but replaces user-supplied keys', async () => {
     const body = '{"contents":[{"parts":[{"inlineData":{"mimeType":"image/png","data":"AA=="}}]}]}';
