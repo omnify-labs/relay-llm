@@ -288,14 +288,16 @@ export interface BudgetIncrementResult {
  * @param userId - User whose budget grows.
  * @param deltaCents - Positive integer cents to add.
  * @param idempotencyKey - Unique per purchase; a repeat is a no-op.
+ * @param transaction - Optional transaction shared with a guarded funding operation.
  * @returns Post-increment budget/spend and whether this call applied the delta.
  */
 export async function incrementUserBudget(
   userId: string,
   deltaCents: number,
   idempotencyKey: string,
+  transaction?: postgres.TransactionSql,
 ): Promise<BudgetIncrementResult> {
-  const sql = getDb();
+  const sql = transaction ?? getDb();
   const rows = await sql`
     WITH ins AS (
       INSERT INTO budget_increments (idempotency_key, user_id, delta_cents, remaining_cents)

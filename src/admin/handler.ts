@@ -7,6 +7,7 @@ import { Hono } from 'hono';
 import { setUserBudget, deleteUserBudget, incrementUserBudget } from '../db/queries.js';
 import { revokeUser } from '../billing/run-admission.js';
 import { RedemptionBudgetConflict } from '../db/redemption.js';
+import { settleRedemptionCredit } from '../db/redemption-credit.js';
 
 export const adminApp = new Hono();
 
@@ -129,6 +130,38 @@ adminApp.post('/users/:user_id/budget/redemption', async (c) => {
     if (error instanceof RedemptionBudgetConflict) return c.json({ error: error.message }, 409);
     console.error(`[Relay] Failed guarded redemption budget transition for user ${userId}`);
     return c.json({ error: 'Failed to reconcile redeemed budget' }, 500);
+  }
+});
+
+/** Grant the immutable card's one-time credit, with ownership and receipt checked in one transaction. */
+adminApp.post('/users/:user_id/budget/redemption-credit', async (c) => {
+  const userId = c.req.param('user_id').toLowerCase();
+  const body = await c.req.json().catch(() => null);
+  const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  if (
+    !body ||
+    !uuid.test(userId) ||
+    typeof body.code_id !== 'string' ||
+    !uuid.test(body.code_id) ||
+    (body.phase !== undefined && body.phase !== 'grant' && body.phase !== 'revoke')
+  ) {
+    return c.json({ error: 'Invalid redemption credit request' }, 400);
+  }
+  try {
+    const result = await settleRedemptionCredit(
+      userId,
+      body.code_id.toLowerCase(),
+      body.phase ?? 'grant',
+    );
+    if (result.clearedTrial) revokeUser(userId);
+    if (body.phase === 'revoke') {
+      for (const member of result.revoked_user_ids ?? [userId]) revokeUser(member);
+    }
+    return c.json({ protocol: 'redemption-credit.v1', ...result });
+  } catch (error) {
+    if (error instanceof RedemptionBudgetConflict) return c.json({ error: error.message }, 409);
+    console.error(`[Relay] Failed redeemed credit grant for user ${userId}`);
+    return c.json({ error: 'Failed to grant redeemed credit' }, 500);
   }
 });
 
