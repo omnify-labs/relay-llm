@@ -506,3 +506,31 @@ returns 409; the caller must reconcile the ended code through `revoke` instead.
 Every personal grant acknowledgement (including replay) invalidates local trial
 admissions. Admission invalidation remains process-local, as with existing admin
 budget writes; this endpoint does not change the production scaling policy.
+
+### Production managed-model region gate
+
+Software/BYOK licenses and gifted balances redeem globally. The production Node
+entrypoint sits behind `deploy/nginx.conf`: requests to all four managed provider
+routes are denied from CN or an unknown country before reaching the provider.
+Health, admin and run-end routes remain available. BYOK requests go directly to the
+user's configured provider and do not pass through Relay. For direct requests, country is resolved from Nginx's connection peer. For the
+existing Cloudflare-proxied domain, CF-IPCountry is accepted only from the
+published Cloudflare peer CIDRs; a missing/invalid country fails closed. All
+other clients' forwarded-IP headers are ignored. An unexpected CF-IPCountry
+from an untrusted peer is rejected, so newly added Cloudflare ranges fail closed
+until their configuration is reviewed. Keep the container
+ports bound to loopback and refresh the reviewed Cloudflare ranges from
+https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6 when changed.
+
+Install Ubuntu `libnginx-mod-http-geoip2` and `python3-maxminddb`, then install the
+[canonical Dassi country updater](https://github.com/omnify-labs/dassi/blob/6c9980a6b54e50d670109ee2313add2d97b16be7/scripts/update-billing-country.py)
+and its daily timer. It installs and verifies `/usr/share/GeoIP/dassi-country.mmdb`.
+Deploy the Nginx file to `/srv/relay-llm/nginx.conf` (the path consumed by deploy.sh),
+run `nginx -t`, and reload. A missing module/database fails configuration validation.
+Keep this CN exclusion in sync with Dassi's `MANAGED_UNAVAILABLE_COUNTRIES` policy.
+The Cloudflare Worker is staging-only and is not a production alternative to this
+ingress. Its promotion requires an equivalent trusted country gate.
+
+`node --test scripts/managed-region.test.mjs` tests the production Nginx routing
+and gate in disposable Docker, with synthetic country lookup results. No model
+requests or real credits are consumed.

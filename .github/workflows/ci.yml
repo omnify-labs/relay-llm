@@ -50,6 +50,9 @@ jobs:
       - name: Start isolated Docker daemon
         run: bash scripts/ci-docker.sh start
 
+      - name: Test managed-model region ingress
+        run: node --test scripts/managed-region.test.mjs
+
       - name: Start disposable PostgreSQL
         run: |
           docker run --detach --rm --name relay-test-postgres --memory 256m \
