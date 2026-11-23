@@ -478,3 +478,31 @@ CI uses `self-host-digital-ocean` with a private Docker daemon and disposable
 PostgreSQL; fork PR jobs are excluded from the trusted runner, and comment-triggered
 assistant jobs require an owner, member or collaborator. Grant this
 repository access to the runner group before expecting these jobs to start.
+
+### Lifetime redemption credits
+
+`POST /admin/users/:user_id/budget/redemption-credit` uses the same admin secret.
+Send `{code_id, phase: "grant" | "revoke"}`; phase defaults to `grant`. Relay derives
+both amount and payer from immutable Dassi lifetime/BYOK batch terms. One Dassi
+credit is one USD cent. A team code funds its workspace once; it never changes
+its owner's personal trial. A personal gift clears only an unfunded trial and
+records its paid marker in the same transaction as the purchased-credit ledger.
+
+Responses carry `protocol: "redemption-credit.v1"`, `account_id`, `applied` and the
+canonical receipt key. Retrying after a lost acknowledgement does not refill
+spent credit. Revocation settles FIFO usage and removes only the gift's unused
+remainder; a separate end receipt protects later purchases from replay. Active
+gifts cannot be revoked, and ended gifts cannot be granted or revived after an
+end receipt. No provider forwarding or Worker behavior changes.
+
+Deploy Dassi's `20261123000100_redemption_credits_and_seats.sql` before this
+endpoint. Keep redemption disabled until both services are ready and a sandbox
+claim/retry/invite/revoke has passed. This PR does not deploy either service.
+
+Personal gift settlement intentionally clears unfunded trial spend/overrun, while
+usage logs retain history. Revocation keeps the paid marker and does not restore
+a free trial. If a grant response is lost and the code ends before retry, grant
+returns 409; the caller must reconcile the ended code through `revoke` instead.
+Every personal grant acknowledgement (including replay) invalidates local trial
+admissions. Admission invalidation remains process-local, as with existing admin
+budget writes; this endpoint does not change the production scaling policy.
