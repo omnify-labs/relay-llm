@@ -513,9 +513,12 @@ Software/BYOK licenses and gifted balances redeem globally. The production Node
 entrypoint sits behind `deploy/nginx.conf`: requests to all four managed provider
 routes are denied from CN or an unknown country before reaching the provider.
 Health, admin and run-end routes remain available. BYOK requests go directly to the
-user's configured provider and do not pass through Relay. Country is resolved from
-Nginx's connection peer; forwarded IP/country headers cannot grant access. Keep the
-container ports bound to loopback and do not put an unconfigured proxy before Nginx.
+user's configured provider and do not pass through Relay. For direct requests, country is resolved from Nginx's connection peer. For the
+existing Cloudflare-proxied domain, CF-IPCountry is accepted only from the
+published Cloudflare peer CIDRs; a missing/invalid country fails closed. All
+other clients' country/forwarded-IP headers are ignored. Keep the container
+ports bound to loopback and refresh the reviewed Cloudflare ranges from
+https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6 when changed.
 
 Install Ubuntu `libnginx-mod-http-geoip2` and `python3-maxminddb`, then install the
 [canonical Dassi country updater](https://github.com/omnify-labs/dassi/blob/6c9980a6b54e50d670109ee2313add2d97b16be7/scripts/update-billing-country.py)

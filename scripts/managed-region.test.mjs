@@ -14,14 +14,18 @@ test("production Nginx denies managed routes by trusted country and preserves ot
     "utf8",
   );
   assert.match(source, /\$dassi_geo_country source=\$remote_addr country_code/);
-  assert.doesNotMatch(source, /real_ip_header|set_real_ip_from|http_.*country/);
+  assert.doesNotMatch(
+    source,
+    /real_ip_header|set_real_ip_from|http_x_(dassi_country|forwarded_for)/,
+  );
   const firstServer = source.indexOf("server {");
   const httpsServer = source.indexOf("server {", firstServer + 1);
   assert.ok(httpsServer > firstServer);
   const lookup =
     "map $http_x_fixture_country $dassi_geo_country { default $http_x_fixture_country; }\n";
-  const policy = source.slice(source.indexOf('map "'), firstServer);
+  const policy = source.slice(source.indexOf("geo $remote_addr"), firstServer);
   const config = (lookup + policy + source.slice(httpsServer))
+    .replace("geo $remote_addr", "geo $http_x_fixture_peer")
     .replace("listen 443 ssl;", "listen 8080;")
     .replace(/^\s*ssl_certificate(?:_key)? .*;\n/gm, "")
     .replace("proxy_pass http://127.0.0.1:8080;", "return 204;");
@@ -78,6 +82,10 @@ test("production Nginx denies managed routes by trusted country and preserves ot
           `${provider}:${country}`,
         );
         if (blocked) {
+          assert.match(
+            response.headers.get("Content-Type"),
+            /application\/json/,
+          );
           assert.equal(
             response.headers.get("Access-Control-Allow-Origin"),
             "*",
@@ -85,6 +93,35 @@ test("production Nginx denies managed routes by trusted country and preserves ot
           assert.match((await response.json()).error, /own API key/);
         }
       }
+    }
+    for (const route of [
+      "/v1/openai/x%0ay",
+      "/v1/google/x%0Ay",
+      "/v1/openai",
+      "/v1/OpenAI/test",
+    ]) {
+      const response = await fetch(url + route, {
+        headers: { "X-Fixture-Country": "CN" },
+      });
+      assert.equal(response.status, 403, route);
+    }
+    for (const [peer, lookup, country, status] of [
+      ["104.16.0.1", "US", "CN", 403],
+      ["104.16.0.1", "CN", "US", 204],
+      ["104.16.0.1", "US", "", 403],
+      ["104.16.0.1", "US", "garbage", 403],
+      ["2606:4700::1", "US", "CN", 403],
+      ["1.2.3.4", "CN", "US", 403],
+      ["1.2.3.4", "US", "CN", 204],
+    ]) {
+      const response = await fetch(`${url}/v1/google/test`, {
+        headers: {
+          "X-Fixture-Peer": peer,
+          "X-Fixture-Country": lookup,
+          "CF-IPCountry": country,
+        },
+      });
+      assert.equal(response.status, status, `proxy ${peer}:${country}`);
     }
     assert.equal(
       (
