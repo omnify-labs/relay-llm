@@ -80,6 +80,27 @@ async function revokeCredit(tx: postgres.TransactionSql, payer: string, key: str
   };
 }
 
+async function grantCredit(
+  tx: postgres.TransactionSql,
+  owner: string,
+  card: Card,
+  key: string,
+  hasReceipt: boolean,
+): Promise<CreditSettlement> {
+  const payer = card.account_id;
+  const ended = await tx`SELECT idempotency_key FROM budget_reset_receipts
+    WHERE user_id=${payer} AND idempotency_key=${key.replace('redemption_credit_', 'redemption_credit_end_')}`;
+  if (ended.length) throw new RedemptionBudgetConflict();
+  if (!hasReceipt) await clearTrial(tx, owner, payer);
+  const result = await incrementUserBudget(payer, card.credits, key, tx);
+  if (owner === payer) {
+    await tx`INSERT INTO public.user_billing(user_id,paid_credit_since,updated_at)
+      VALUES (${owner}::uuid,now(),now()) ON CONFLICT(user_id) DO UPDATE
+      SET paid_credit_since=coalesce(user_billing.paid_credit_since,EXCLUDED.paid_credit_since),updated_at=now()`;
+  }
+  return { ...result, account_id: payer, idempotency_key: key };
+}
+
 /**
  * Settle an immutable card's gift in one transaction. Eligibility is checked
  * after the payer lock; receipt replay never refills or re-voids later credit.
@@ -121,20 +142,6 @@ export async function settleRedemptionCredit(
         idempotency_key: `redemption_credit_end_${code}`,
       };
     }
-    const ended =
-      await tx`SELECT idempotency_key FROM budget_reset_receipts WHERE user_id=${payer} AND idempotency_key=${'redemption_credit_end_' + code}`;
-    if (ended.length) throw new RedemptionBudgetConflict();
-    if (!receipt) await clearTrial(tx, owner, payer);
-    const result = await incrementUserBudget(payer, card.credits, key, tx);
-    if (owner === payer) {
-      await tx`INSERT INTO public.user_billing(user_id,paid_credit_since,updated_at)
-        VALUES (${owner}::uuid,now(),now()) ON CONFLICT(user_id) DO UPDATE
-        SET paid_credit_since=coalesce(user_billing.paid_credit_since,EXCLUDED.paid_credit_since),updated_at=now()`;
-    }
-    return {
-      ...result,
-      account_id: payer,
-      idempotency_key: key,
-    };
+    return grantCredit(tx, owner, card, key, !!receipt);
   });
 }
