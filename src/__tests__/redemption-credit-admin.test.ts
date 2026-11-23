@@ -54,6 +54,16 @@ describe('guarded one-time redemption credit', () => {
     mocks.grant.mockRejectedValue(new Error('database unavailable'));
     expect((await request({ code_id: code })).status).toBe(500);
   });
+  it('invalidates a personal trial admission even on an acknowledged grant replay', async () => {
+    admitRun(owner, 'trial-run', Date.now(), 2);
+    mocks.grant.mockResolvedValue({
+      account_id: owner,
+      applied: false,
+      idempotency_key: `redemption_credit_${code}`,
+    });
+    expect((await request({ code_id: code })).status).toBe(200);
+    expect(isRunAdmitted(owner, 'trial-run')).toBe(false);
+  });
   it('passes revocation through the verified settlement boundary', async () => {
     admitRun(owner, 'owner-run');
     admitRun('member', 'member-run');

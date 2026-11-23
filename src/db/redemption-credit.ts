@@ -7,7 +7,6 @@ import { FREE_TIER_PLAN_BASE_CEILING } from '../billing/policy.js';
 type CreditSettlement = BudgetIncrementResult & {
   account_id: string;
   idempotency_key: string;
-  clearedTrial: boolean;
   revoked_user_ids?: string[];
 };
 
@@ -32,9 +31,10 @@ async function clearTrial(
   tx: postgres.TransactionSql,
   owner: string,
   payer: string,
-): Promise<boolean> {
-  if (owner !== payer) return false;
-  const rows = await tx`
+): Promise<void> {
+  if (owner !== payer) return;
+  // Trial usage does not consume a purchased gift; usage_logs retain its history.
+  await tx`
     UPDATE user_budgets SET plan_base=0, budget=0, spend=0, updated_at=now()
     WHERE user_id=${payer} AND plan_base <= ${FREE_TIER_PLAN_BASE_CEILING}
       AND NOT EXISTS (SELECT 1 FROM budget_increments WHERE user_id=${payer})
@@ -42,9 +42,7 @@ async function clearTrial(
       AND NOT EXISTS (SELECT 1 FROM public.subscriptions WHERE user_id=${owner}::uuid
         AND canceled_at IS NULL AND status IN ('active','trialing','past_due')
         AND (NOT is_one_time OR current_period_end IS NULL OR current_period_end > clock_timestamp()))
-    RETURNING user_id
   `;
-  return rows.length > 0;
 }
 
 /** Remove only this gift's unspent credit, settling its already-accounted FIFO usage. */
@@ -53,6 +51,7 @@ async function revokeCredit(tx: postgres.TransactionSql, payer: string, key: str
     VALUES (${payer},${key.replace('redemption_credit_', 'redemption_credit_end_')})
     ON CONFLICT DO NOTHING RETURNING idempotency_key`;
   if (receipt.length) {
+    // Keep the reset writer's FIFO order, but settle this gift in micro-USD before removing it.
     await tx`
       WITH gift AS MATERIALIZED (
         SELECT b.remaining_cents,
@@ -78,7 +77,6 @@ async function revokeCredit(tx: postgres.TransactionSql, payer: string, key: str
     applied: receipt.length > 0,
     budget: Number(state.budget),
     spend: Number(state.spend),
-    clearedTrial: false,
   };
 }
 
@@ -126,7 +124,7 @@ export async function settleRedemptionCredit(
     const ended =
       await tx`SELECT idempotency_key FROM budget_reset_receipts WHERE user_id=${payer} AND idempotency_key=${'redemption_credit_end_' + code}`;
     if (ended.length) throw new RedemptionBudgetConflict();
-    const clearedTrial = !receipt && (await clearTrial(tx, owner, payer));
+    if (!receipt) await clearTrial(tx, owner, payer);
     const result = await incrementUserBudget(payer, card.credits, key, tx);
     if (owner === payer) {
       await tx`INSERT INTO public.user_billing(user_id,paid_credit_since,updated_at)
@@ -137,7 +135,6 @@ export async function settleRedemptionCredit(
       ...result,
       account_id: payer,
       idempotency_key: key,
-      clearedTrial: !!clearedTrial,
     };
   });
 }

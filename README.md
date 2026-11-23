@@ -498,3 +498,11 @@ end receipt. No provider forwarding or Worker behavior changes.
 Deploy Dassi's `20261123000100_redemption_credits_and_seats.sql` before this
 endpoint. Keep redemption disabled until both services are ready and a sandbox
 claim/retry/invite/revoke has passed. This PR does not deploy either service.
+
+Personal gift settlement intentionally clears unfunded trial spend/overrun, while
+usage logs retain history. Revocation keeps the paid marker and does not restore
+a free trial. If a grant response is lost and the code ends before retry, grant
+returns 409; the caller must reconcile the ended code through `revoke` instead.
+Every personal grant acknowledgement (including replay) invalidates local trial
+admissions. Admission invalidation remains process-local, as with existing admin
+budget writes; this endpoint does not change the production scaling policy.

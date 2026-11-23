@@ -343,7 +343,7 @@ try {
       await prepareGift();
       await sql`INSERT INTO budget_increments VALUES ('pi_kept',${user},1000,1000,now())`;
       await sql`UPDATE user_budgets SET budget=12 WHERE user_id=${user}`;
-      assert.equal((await gift()).clearedTrial, false);
+      await gift();
       assert.deepEqual(await balance(), {
         plan_base: 2,
         budget: 19.5,

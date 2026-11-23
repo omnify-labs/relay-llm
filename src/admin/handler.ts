@@ -153,7 +153,7 @@ adminApp.post('/users/:user_id/budget/redemption-credit', async (c) => {
       body.code_id.toLowerCase(),
       body.phase ?? 'grant',
     );
-    if (result.clearedTrial) revokeUser(userId);
+    if (body.phase !== 'revoke' && result.account_id === userId) revokeUser(userId);
     if (body.phase === 'revoke') {
       for (const member of result.revoked_user_ids ?? [userId]) revokeUser(member);
     }
