@@ -69,7 +69,7 @@ test("production Nginx denies managed routes by trusted country and preserves ot
           method: "POST",
           headers: {
             "X-Fixture-Country": country,
-            "CF-IPCountry": "US",
+            "CF-Connecting-IP": "8.8.8.8",
             "X-Dassi-Country": "US",
             "X-Forwarded-For": "8.8.8.8",
             "X-Dassi-Run-Id": "already-admitted",
@@ -112,7 +112,9 @@ test("production Nginx denies managed routes by trusted country and preserves ot
       ["104.16.0.1", "US", "garbage", 403],
       ["2606:4700::1", "US", "CN", 403],
       ["1.2.3.4", "CN", "US", 403],
-      ["1.2.3.4", "US", "CN", 204],
+      ["1.2.3.4", "US", "CN", 403],
+      ["1.2.3.4", "US", "US", 403],
+      ["1.2.3.4", "US", "", 204],
     ]) {
       const response = await fetch(`${url}/v1/google/test`, {
         headers: {

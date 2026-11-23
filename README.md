@@ -516,7 +516,9 @@ Health, admin and run-end routes remain available. BYOK requests go directly to 
 user's configured provider and do not pass through Relay. For direct requests, country is resolved from Nginx's connection peer. For the
 existing Cloudflare-proxied domain, CF-IPCountry is accepted only from the
 published Cloudflare peer CIDRs; a missing/invalid country fails closed. All
-other clients' country/forwarded-IP headers are ignored. Keep the container
+other clients' forwarded-IP headers are ignored. An unexpected CF-IPCountry
+from an untrusted peer is rejected, so newly added Cloudflare ranges fail closed
+until their configuration is reviewed. Keep the container
 ports bound to loopback and refresh the reviewed Cloudflare ranges from
 https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6 when changed.
 
