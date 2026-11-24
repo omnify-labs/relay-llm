@@ -154,10 +154,10 @@ adminApp.post('/users/:user_id/budget/redemption-credit', async (c) => {
       body.phase ?? 'grant',
     );
     if (body.phase !== 'revoke' && result.account_id === userId) revokeUser(userId);
-    if (body.phase === 'revoke') {
-      for (const member of result.revoked_user_ids ?? [userId]) revokeUser(member);
-    }
-    return c.json({ protocol: 'redemption-credit.v1', ...result });
+    for (const member of result.revoked_user_ids ?? (body.phase === 'revoke' ? [userId] : []))
+      revokeUser(member);
+    const { protocol = 'redemption-credit.v1', ...receipt } = result;
+    return c.json({ protocol, ...receipt });
   } catch (error) {
     if (error instanceof RedemptionBudgetConflict) return c.json({ error: error.message }, 409);
     console.error(`[Relay] Failed redeemed credit grant for user ${userId}`);

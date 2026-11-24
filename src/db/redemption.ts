@@ -70,3 +70,12 @@ export async function preserveRedemptionBudget(
   }
   return guard.phase === 'end' && (state.replacement || (state.subscribed && state.funded));
 }
+
+/** A locked redemption card and the payer authorized by its stored ownership. */
+export interface RedemptionCard {
+  account_id: string;
+  credits: number;
+  workspace_id: string | null;
+  source: 'internal' | 'appsumo';
+  credits_granted_at: string | null;
+}
