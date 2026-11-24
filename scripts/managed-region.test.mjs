@@ -112,6 +112,8 @@ test("production Nginx denies managed routes by trusted country and preserves ot
       ["104.16.0.1", "US", "", 403],
       ["104.16.0.1", "US", "garbage", 403],
       ["2606:4700::1", "US", "XX", 403],
+      ["2606:4700::1", "US", "CN", 204],
+      ["1.2.3.4", "CN", "", 204],
       ["1.2.3.4", "CN", "US", 403],
       ["1.2.3.4", "US", "CN", 403],
       ["1.2.3.4", "US", "US", 403],
