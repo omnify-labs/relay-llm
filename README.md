@@ -538,3 +538,9 @@ ingress. Its promotion requires an equivalent trusted country gate.
 `node --test scripts/managed-region.test.mjs` tests the production Nginx routing
 and gate in disposable Docker, with synthetic country lookup results. No model
 requests or real credits are consumed.
+
+Use the disposable Docker Nginx test for routing validation. A standalone Nginx
+master on the production host must use its own PID, logs and all five temp paths
+(`client_body`, `proxy`, `fastcgi`, `uwsgi`, `scgi`); never share `/var/lib/nginx`.
+Even `nginx -t -c ...` can change ownership of configured cache directories.
+The normal `nginx -t` command uses the production config and worker identity.
