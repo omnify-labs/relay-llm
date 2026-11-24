@@ -544,3 +544,14 @@ master on the production host must use its own PID, logs and all five temp paths
 (`client_body`, `proxy`, `fastcgi`, `uwsgi`, `scgi`); never share `/var/lib/nginx`.
 Even `nginx -t -c ...` can change ownership of configured cache directories.
 The normal `nginx -t` command uses the production config and worker identity.
+
+AppSumo lifetime licenses reuse the guarded redemption-credit endpoint with an
+`appsumo-credit.v1` acknowledgement. The database migration is owned by Dassi.
+All license versions keep a stable root code and workspace payer. Gift receipts
+record cumulative tier differences: upgrade grants the missing credit, while
+downgrade/re-upgrade never refill spent credit. Final revocation removes only
+unused AppSumo gifts through the shared FIFO/subcent revoker. Financial markers
+commit with the ledger transaction. Pending tier changes and refunds invalidate
+admissions for the owner and historical workspace members, including removed seats.
+Run `pnpm test:redemption-database` for concurrent grants, refunds and purchase
+preservation, alongside the existing typecheck, lint and unit tests.

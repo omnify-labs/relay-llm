@@ -28,3 +28,8 @@ CREATE TABLE budget_reset_receipts (
 );
 
 CREATE TABLE public.user_billing(user_id uuid PRIMARY KEY REFERENCES auth.users(id), paid_credit_since timestamptz, updated_at timestamptz DEFAULT now());
+
+ALTER TABLE redemption_codes ADD COLUMN source text NOT NULL DEFAULT 'internal';
+ALTER TABLE redemption_codes ADD COLUMN credits_granted_at timestamptz;
+ALTER TABLE redemption_codes ADD COLUMN credits_ended_at timestamptz;
+CREATE TABLE resource_workspace_members(workspace_id uuid,user_id uuid);

@@ -77,4 +77,19 @@ describe('guarded one-time redemption credit', () => {
     expect(isRunAdmitted('member', 'member-run')).toBe(false);
     expect(mocks.grant).toHaveBeenCalledWith(owner, code, 'revoke');
   });
+  it('acknowledges AppSumo tier settlement and invalidates removed members even on grant', async () => {
+    admitRun(owner, 'owner-run');
+    admitRun('removed-member', 'removed-run');
+    mocks.grant.mockResolvedValue({
+      protocol: 'appsumo-credit.v1',
+      account_id: 'workspace',
+      applied: false,
+      idempotency_key: `appsumo_credit_grant_${code}`,
+      revoked_user_ids: [owner, 'removed-member'],
+    });
+    const response = await request({ code_id: code });
+    expect(await response.json()).toMatchObject({ protocol: 'appsumo-credit.v1' });
+    expect(isRunAdmitted(owner, 'owner-run')).toBe(false);
+    expect(isRunAdmitted('removed-member', 'removed-run')).toBe(false);
+  });
 });

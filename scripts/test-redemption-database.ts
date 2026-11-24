@@ -36,7 +36,7 @@ const balance = async () => {
 };
 async function check(label: string, run: () => Promise<void>) {
   await sql`TRUNCATE auth.users, redemption_batches, redemption_codes, subscriptions,
-    test_seats, user_budgets, budget_increments, budget_reset_receipts, user_billing CASCADE`;
+    test_seats, resource_workspace_members, user_budgets, budget_increments, budget_reset_receipts, user_billing CASCADE`;
   await sql`INSERT INTO auth.users VALUES (${user}), (${other})`;
   await sql`INSERT INTO redemption_batches VALUES (${batch}, 'month', 'starter')`;
   await sql`INSERT INTO redemption_codes VALUES
@@ -457,6 +457,83 @@ try {
       assert.equal((await settleRedemptionCredit(user, card, 'revoke')).applied, true);
       assert.deepEqual(await balance(), { plan_base: 2, budget: 2, spend: 3 });
       assert.equal(Number((await sql`SELECT count(*) FROM budget_increments`)[0].count), 0);
+    },
+  );
+  async function appsumoGift(credits = 750) {
+    await prepareGift(credits, other);
+    await sql`UPDATE redemption_codes SET source='appsumo' WHERE id=${card}`;
+    await sql`INSERT INTO resource_workspace_members VALUES (${other},${user}),(${other},${other})`;
+  }
+  const payerBalance = async () => {
+    const [row] = await sql`SELECT budget,spend FROM user_budgets WHERE user_id=${other}`;
+    return { budget: Number(row.budget), spend: Number(row.spend) };
+  };
+  await check(
+    'AppSumo concurrent activation grants once and upgrades only the cumulative difference',
+    async () => {
+      await appsumoGift();
+      const grants = await Promise.all(Array.from({ length: 12 }, () => gift()));
+      assert.equal(grants.filter((r) => r.applied).length, 1);
+      assert.equal(grants[0].protocol, 'appsumo-credit.v1');
+      assert.deepEqual(await payerBalance(), { budget: 7.5, spend: 0 });
+      await sql`UPDATE user_budgets SET spend=6 WHERE user_id=${other}`;
+      await sql`UPDATE redemption_batches SET credits=2000`;
+      await sql`UPDATE redemption_codes SET credits_granted_at=NULL`;
+      const upgrade = await gift();
+      assert.equal(upgrade.applied, true);
+      assert.deepEqual(new Set(upgrade.revoked_user_ids), new Set([user, other]));
+      assert.deepEqual(await payerBalance(), { budget: 20, spend: 6 });
+      await sql`UPDATE redemption_batches SET credits=750`;
+      await sql`UPDATE redemption_codes SET credits_granted_at=NULL`;
+      assert.equal((await gift()).applied, false);
+      await sql`UPDATE redemption_batches SET credits=2000`;
+      await sql`UPDATE redemption_codes SET credits_granted_at=NULL`;
+      assert.equal((await gift()).applied, false);
+      assert.deepEqual(await payerBalance(), { budget: 20, spend: 6 });
+      assert.equal(
+        Number(
+          (
+            await sql`SELECT sum(delta_cents) AS total FROM budget_increments WHERE user_id=${other}`
+          )[0].total,
+        ),
+        2000,
+      );
+    },
+  );
+  await check(
+    'AppSumo refund removes only unused cumulative gifts, keeps purchases and never refills on retries',
+    async () => {
+      await appsumoGift();
+      await gift();
+      await sql`UPDATE budget_increments SET created_at=now()-interval '2 hours'`;
+      await sql`UPDATE redemption_batches SET credits=2000`;
+      await sql`UPDATE redemption_codes SET credits_granted_at=NULL`;
+      await gift();
+      await sql`UPDATE budget_increments SET created_at=now()-interval '1 hour' WHERE delta_cents=1250`;
+      await sql`INSERT INTO budget_increments VALUES ('pi_other_purchase',${other},1000,1000,now())`;
+      await sql`UPDATE user_budgets SET budget=30,spend=9.000001 WHERE user_id=${other}`;
+      await sql`UPDATE redemption_codes SET revoked_at=now()`;
+      const refunds = await Promise.all(
+        Array.from({ length: 8 }, () => settleRedemptionCredit(user, card, 'revoke')),
+      );
+      assert.equal(refunds.filter((r) => r.applied).length, 1);
+      assert.deepEqual(await payerBalance(), { budget: 10, spend: 0 });
+      assert.equal(
+        Number(
+          (
+            await sql`SELECT remaining_cents FROM budget_increments WHERE idempotency_key='pi_other_purchase'`
+          )[0].remaining_cents,
+        ),
+        1000,
+      );
+      await sql`UPDATE redemption_codes SET revoked_at=NULL,credits_granted_at=NULL`;
+      assert.equal((await gift()).applied, false);
+      assert.deepEqual(await payerBalance(), { budget: 10, spend: 0 });
+      assert.equal(
+        (await sql`SELECT credits_granted_at IS NOT NULL AS recorded FROM redemption_codes`)[0]
+          .recorded,
+        true,
+      );
     },
   );
   console.log(`${passed} guarded redemption database tests passed`);
