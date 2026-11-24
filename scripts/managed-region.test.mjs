@@ -75,7 +75,7 @@ test("production Nginx denies managed routes by trusted country and preserves ot
             "X-Dassi-Run-Id": "already-admitted",
           },
         });
-        const blocked = ["CN", "", "XX", "ZZ", "T1"].includes(country);
+        const blocked = ["", "XX", "ZZ", "T1"].includes(country);
         assert.equal(
           response.status,
           blocked ? 403 : 204,
@@ -101,16 +101,19 @@ test("production Nginx denies managed routes by trusted country and preserves ot
       "/v1/OpenAI/test",
     ]) {
       const response = await fetch(url + route, {
-        headers: { "X-Fixture-Country": "CN" },
+        headers: { "X-Fixture-Country": "XX" },
       });
       assert.equal(response.status, 403, route);
     }
     for (const [peer, lookup, country, status] of [
-      ["104.16.0.1", "US", "CN", 403],
+      ["104.16.0.1", "US", "CN", 204],
+      ["104.16.0.1", "US", "XX", 403],
       ["104.16.0.1", "CN", "US", 204],
       ["104.16.0.1", "US", "", 403],
       ["104.16.0.1", "US", "garbage", 403],
-      ["2606:4700::1", "US", "CN", 403],
+      ["2606:4700::1", "US", "XX", 403],
+      ["2606:4700::1", "US", "CN", 204],
+      ["1.2.3.4", "CN", "", 204],
       ["1.2.3.4", "CN", "US", 403],
       ["1.2.3.4", "US", "CN", 403],
       ["1.2.3.4", "US", "US", 403],
@@ -129,14 +132,14 @@ test("production Nginx denies managed routes by trusted country and preserves ot
       (
         await fetch(`${url}/v1/google/test`, {
           method: "OPTIONS",
-          headers: { "X-Fixture-Country": "CN" },
+          headers: { "X-Fixture-Country": "XX" },
         })
       ).status,
       204,
     );
     for (const route of ["/health", "/admin/budget", "/v1/runs/fixture/end"]) {
       assert.equal(
-        (await fetch(url + route, { headers: { "X-Fixture-Country": "CN" } }))
+        (await fetch(url + route, { headers: { "X-Fixture-Country": "XX" } }))
           .status,
         204,
       );
