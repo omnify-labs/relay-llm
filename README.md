@@ -511,7 +511,10 @@ budget writes; this endpoint does not change the production scaling policy.
 
 Software/BYOK licenses and gifted balances redeem globally. The production Node
 entrypoint sits behind `deploy/nginx.conf`: requests to all four managed provider
-routes are denied from CN or an unknown country before reaching the provider.
+routes are denied from an unknown country before reaching the provider.
+Production currently explicitly sets `MANAGED_UNAVAILABLE_COUNTRIES` to an empty
+string, so this gate must not add a CN exclusion from the application default.
+Known CN addresses remain eligible under that deployed policy.
 Health, admin and run-end routes remain available. BYOK requests go directly to the
 user's configured provider and do not pass through Relay. For direct requests, country is resolved from Nginx's connection peer. For the
 existing Cloudflare-proxied domain, CF-IPCountry is accepted only from the
@@ -527,7 +530,8 @@ Install Ubuntu `libnginx-mod-http-geoip2` and `python3-maxminddb`, then install 
 and its daily timer. It installs and verifies `/usr/share/GeoIP/dassi-country.mmdb`.
 Deploy the Nginx file to `/srv/relay-llm/nginx.conf` (the path consumed by deploy.sh),
 run `nginx -t`, and reload. A missing module/database fails configuration validation.
-Keep this CN exclusion in sync with Dassi's `MANAGED_UNAVAILABLE_COUNTRIES` policy.
+Before changing country exclusions, compare the explicit production value of
+Dassi's `MANAGED_UNAVAILABLE_COUNTRIES`, not just its source-code fallback.
 The Cloudflare Worker is staging-only and is not a production alternative to this
 ingress. Its promotion requires an equivalent trusted country gate.
 
